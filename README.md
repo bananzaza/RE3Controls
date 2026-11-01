@@ -193,7 +193,7 @@ gamepad players are unaffected.
 ## Logging
 
 The build writes a few diagnostic lines to RE3Controls.log: `keyq:` (aim/fire key
-queries), `fire: timer=闁炽儺娉?(the fire-action timer when the hold-off triggers) and
+queries), `fire: timer=闂佺偨鍎哄▔?(the fire-action timer when the hold-off triggers) and
 `trace:` (a two-second sample after an aim release).  They are rate limited and can be
 ignored, or removed from the sources if you build it yourself.
 ## Fixes in mod64h (added after mod63x)
@@ -256,3 +256,26 @@ Only fixes that were verified in play are in this build:
   interrupts the swing.
 - **Throwing an item and releasing the aim immediately**: the throw's recovery carries the character forward by
   animation root motion. Waiting for the recovery to finish before letting go of the aim avoids the twitch.
+---
+
+## Changes in 1.9.4-mod103
+
+- **Knife sprint**: holding the run input during a slash moves at the game's own run speed in the
+  forward direction, and at the aim-walk speed in every other direction.  No invented multiplier -
+  the previous attempt (walk speed x 2.6) made the ordinary forward run twice as fast.
+- **Knife swing no longer stalls**: it feeds the leg layer (it used to fight it), so the swing can
+  be moved and steered instead of freezing the character.
+- **Weapon switching does not stutter**: aid 0x20 is the weapon change, not the throw, and is no
+  longer treated as a thrown item.
+- **Aim is ignored during interactions, melee, vaults and climbs** (busy action range plus the
+  0x80000000 sentinel).
+- **Thrown item holds the character still**: the stick is withheld and the gun stays raised while
+  the thrown-item action plays, so the character does not walk off during it.
+
+### Known issue
+
+The legs twitch while the thrown item plays out.  Five different approaches were tried (clearing
+the direction bits only, switching the leg layer off, zeroing the stick at the source, a 30 frame
+dead window, and restricting the window to the throw action): each one either kept the twitch or
+made the character unable to move at all.  The motion comes from the engine's own animation blend,
+which the mod cannot address from the pad side.

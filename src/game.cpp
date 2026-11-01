@@ -19,6 +19,16 @@
 #include <d3d9.h>
 #include <math.h>
 #include "MinHook.h"
+// The game is not always loaded at 0x400000 (its protector can rebase it), so every vtable/address comparison has to be
+// relative to the module base.  These take the original address (what the disassembly shows) and return the live one.
+static uint32_t ModuleBase()
+{
+    static uint32_t base = 0;
+    if (!base) { HMODULE h = GetModuleHandleA("re5dx9.exe"); base = h ? (uint32_t)(uintptr_t)h : 0x00400000u; }
+    return base;
+}
+static inline uint32_t VaOf(uint32_t originalVa) { return ModuleBase() + (originalVa - 0x00400000u); }bool g_throwAimHeld = false;
+bool g_throwTail = false;   // a thrown item is playing out: keep the legs off
 
 using namespace re5;
 
@@ -403,9 +413,14 @@ static void InventoryWalk(ControlsState& S, uint32_t padObj, uint32_t character,
     }
     const bool orbit = freeCam && fc.initialised;
     const bool runGait = changing && wantRun && stickMag >= 0.3f;  // the gait goes on, as in ApplyControls
-    const bool legs = AimWalkUpdate(character, changing && !orbit ? st.lx : 0.0f,
-                                    changing ? (orbit ? (back ? -stickMag : stickMag) : st.ly) : 0.0f, changing,
-                                    MoveSpeedFor(character, runGait ? 5 : 2), dt, runGait, changing, keyboard);
+    // The knife swing must drive the legs like a normal move, otherwise the character can only walk (or not move at all)
+    // during it: the layer is fed whenever the swing runs, and the run gait is allowed there too.
+    const uint32_t aidSwingNow = At<uint32_t>(character, ch::ActionId);
+    const bool swingNow = (aidSwingNow == aid::KnifeAttack);
+    const bool changingNow = changing || swingNow;
+    const bool legs = AimWalkUpdate(character, changingNow && !orbit ? st.lx : 0.0f,
+                                    changingNow ? (orbit ? (back ? -stickMag : stickMag) : st.ly) : 0.0f, changingNow,
+                                    MoveSpeedFor(character, runGait ? 5 : 2), dt, runGait || swingNow, changingNow, keyboard);
     NetLocalFrame(character, free, legs);
     // Standing with the stick let go: the game's own inventory stop (nothing to walk).
     if (!(free || window) || (lMag < 0.3f && (action == plact::Wait || action == plact::Relax))) return;
@@ -519,10 +534,20 @@ static void ApplyControls(uint32_t padObj, uint32_t character) {
         }
     }
     const uint32_t aidGate = At<uint32_t>(character, ch::ActionId);
-    const bool busyAction = ((aidGate >= 0x28 && aidGate <= 0x4D) || (aidGate >= 0x90 && aidGate <= 0x99));
+    // A climb (and a few other scripted states) report the invalid-action sentinel 0x80000000, which the ranges below do
+    // not cover - that is why aiming on a ladder still turned the character.
+    const bool busyAction = ((aidGate >= 0x28 && aidGate <= 0x4D) || (aidGate >= 0x90 && aidGate <= 0x99) ||
+                             (aidGate & 0x80000000u) != 0);
     const bool aiming = ((phys & P_LT) != 0) && !busyAction;   // the aim would turn the character mid-action
     const bool knife = (phys & P_LB) != 0;
-    const bool aimHeld = aiming || knife;
+    // While a thrown item plays out the mod keeps treating the player as aiming, exactly as if the button were still held.
+    // Every "aim ended" path (camera hand-back, facing, leg handover) is gated on this flag, and those are what made the
+    // recovery twitch when the button was released early.  The pad bit alone was not enough - this is the internal state.
+    const uint32_t vtThrowNow = Readable((void*)(character + ch::CurAction), 4) ? At<uint32_t>(character + ch::CurAction, 0) : 0;
+    const bool throwHeld = (vtThrowNow == VaOf(0x0104456C) || vtThrowNow == VaOf(0x01044F38));
+    if (throwHeld) { g_throwAimHeld = true; } else { g_throwAimHeld = false; }
+    g_throwAimHeld = throwHeld;   // the game answers the aim key from this, not from the pad
+    const bool aimHeld = aiming || knife || throwHeld;
     // KnifeFromAim: LB pressed while LT is held readies the knife from the gun aim (the game's own knife + gun bits
     // together); LT pressed while the knife is out still goes to the gun.
     if (physTrg & P_LT) S.knifeLast = false;
@@ -980,9 +1005,11 @@ static void ApplyControls(uint32_t padObj, uint32_t character) {
     // is running and ReloadWalk is on.
     // Leaving the aim plays ReadyEnd for a moment; steering was not taken there, so the character kept the direction it
     // had when the gun went down.  The fire action is included for the same reason.
+    const uint32_t aidSt = At<uint32_t>(character, ch::ActionId);
+    const bool knifeSt = (aidSt >= aid::KnifeBegin && aidSt <= aid::KnifeAttack);
     const bool moveSteer = ((reloadMove || action == plact::Reload) && c.reloadWalk && action == plact::Reload) ||
                            ((action == plact::ReadyEnd || action == plact::Fire) && !aimHeld) || changeMove;
-            if (stickMag >= 0.3f && fc.initialised && S.quickTurnT < 0 && (InLocomotion(character) || moveSteer)) {
+            if (stickMag >= 0.3f && fc.initialised && S.quickTurnT < 0 && (InLocomotion(character) || moveSteer || knifeSt)) {
                 // BackStep: toward the camera without running steps back, facing where the camera looks (the game's
                 // own walk back), as in the original game; a reload or switch on the move steps back too. A counts
                 // only where it is the run (Run=Stock, the original buttons); otherwise it is the action button.
@@ -1125,6 +1152,8 @@ static void ApplyControls(uint32_t padObj, uint32_t character) {
             At<float>(character, 0x2700) = px;
             At<float>(character, 0x2704) = py;
             At<float>(character, 0x2708) = pz;
+            // The swing locks the facing, so it is written every frame while the swing runs (not only on the id change).
+            if (actionId == aid::KnifeAttack) { SetCharacterYaw(character, fc.yaw); KbSyncTargetYaw(character); }
             if (knifePrev[kSlot] != actionId) {
                 SetCharacterYaw(character, fc.yaw);
                 KbSyncTargetYaw(character);
@@ -1141,10 +1170,21 @@ static void ApplyControls(uint32_t padObj, uint32_t character) {
     const bool zoomHold = scope && !kbm && (phys & partnerBit);
     // The RELOAD action itself is walkable, whoever started it: when a magazine runs out the game reloads by itself and
     // the mod's own reload state (reloadMove) is never set, so the character stood still.  ReloadWalk is the switch.
+    // Measured action ids (from the mod's own timeline): 0x20 = item use / throw start, 0x85 = the throw itself.
+    const uint32_t aidThrowNow = At<uint32_t>(character, ch::ActionId);
+    const bool thrownItem = (aidThrowNow == 0x20 || aidThrowNow == 0x85);
+    static int throwWin[8] = {};
+    const int tw = slot & 7;
+    throwWin[tw] = 0;
+    const bool throwWindow = false;
+    // The direction is taken out at the source as well.  Clearing only the finished pad bits left the stick ANGLE and
+    // MAGNITUDE fields alive, which is why pressing anything but W still made the legs twitch: the game still saw a
+    // pushed stick.  Both the local copy and the pad fields are zeroed while the throw window is open.
+
     const bool walkAllowed = ((action == plact::Reload && !aimHeld && c.reloadWalk) ||
                               (aiming && !knifeWins && c.gunWalk) || (knife && (!aiming || knifeWins) && c.knifeWalk) ||
                               (reloadMove && c.reloadWalk) || (action == plact::ReadyEnd && c.gunWalk) ||
-                              (knifeState && !aimHeld && c.knifeWalk && actionId != aid::KnifeAttack) || changeMove) &&
+                              (knifeState && c.knifeWalk) || changeMove) && !g_throwTail &&
                              !(switching && !c.switchWalk) && (!scope || (scopeWalk && !zoomHold)) &&
                              !(ride & 0x4000);  // riding: anchored
     if (kbm)
@@ -1173,8 +1213,52 @@ static void ApplyControls(uint32_t padObj, uint32_t character) {
         walkX = 0.0f;
         walkY = backStep ? -stickMag : stickMag;
     }
+    static bool kKnifeRunOk = true;
+    // The knife: while the layer walks it also takes the stick away from the pad, so the direction has to be given to
+    // the layer in character space (camera-relative stick turned by the character yaw).  Without this the swing could
+    // only go forward.
+    {
+        const uint32_t aidW = At<uint32_t>(character, ch::ActionId);
+        kKnifeRunOk = true;
+        if (aidW >= aid::KnifeBegin && aidW <= aid::KnifeAttack && stickMag >= 0.3f && freeCam && fc.initialised) {
+            // No turning: the direction is handed to the layer in character space, so the character keeps facing where the
+            // swing put it and simply moves that way.
+            const float wantYaw = StickWorldYaw(fc, st.lx, st.ly);
+            const float rel = wantYaw - CharacterYaw(character);
+            const float m = stickMag > 1.0f ? 1.0f : stickMag;
+            walkX = -sinf(rel) * m;   // the layer uses the opposite X sign
+            walkY = cosf(rel) * m;
+            // The run clips only go forward: running is only used when the stick points ahead, otherwise the character
+            // walks in that direction (turning while swinging looked wrong).
+            kKnifeRunOk = (fabsf(rel) < 0.7f);
+        }
+    }
+    // The knife can run as well: with the run button held the layer is given the run gait and its speed.
+    const uint32_t aidR = At<uint32_t>(character, ch::ActionId);
+    const bool knifeRun = (aidR >= aid::KnifeBegin && aidR <= aid::KnifeAttack) && stickMag >= 0.3f && runIntent;
+    // The knife moves at the running speed in every direction; only the forward run uses the run clips (the others walk,
+    // because the run animation only exists for forward).
+    const bool knifeAny = (aidR >= aid::KnifeBegin && aidR <= aid::KnifeAttack) && stickMag >= 0.3f;
+    // The measurement (mod93) showed the knife got pace = 1.00, i.e. MoveSpeedFor(ch, 5) returned the WALK speed - so the
+    // slash moved at walking pace while asking for the run gait.  The game's run speed is only valid once its own
+    // locomotion has been entered, so a sane fallback is used when the read is not usable.
+    // No invented multiplier any more: it made the normal forward run twice as fast once the value was cached.  The knife
+    // now uses exactly the game's own walk and run speeds, chosen by the run input.
+    // Forward: the game's own walk/run speed.  Any other direction: the same speed the character has when aiming and
+    // walking in that direction, which is what was asked for.
+    const bool knifeFwd = kKnifeRunOk;   // computed above: the stick points ahead of the swing
+    const float knifeSpeed = knifeFwd ? MoveSpeedFor(character, runIntent ? 5 : 2)
+                                      : (runIntent ? c.aimWalkFastSpeed : c.aimWalkAnimSpeed);
+    const float paceUse = knifeAny ? knifeSpeed : pace;
     const bool aimWalking =
-        AimWalkUpdate(character, walkX, walkY, walkAllowed, pace, (float)dt, runGait, keepGait, kbm, preStart);
+        AimWalkUpdate(character, walkX, walkY, walkAllowed, paceUse, (float)dt, runGait || knifeRun, keepGait, kbm, preStart);
+    // Diagnostic for the "cannot run with the knife" report: what the swing is actually given.
+    if (knifeAny) {
+        static int nK = 0;
+        if ((++nK % 10) == 0)
+            Log("knife: aid=%02X stick=%.2f allow=%d pace=%.2f run=%d got=%d walk=%.2f",
+                aidR, stickMag, (int)walkAllowed, paceUse, (int)(runGait || knifeRun), (int)aimWalking, MoveSpeedFor(character, 2));
+    }
     // In the preStart frame the game is still walking: it keeps the stick (if it turns the action down, the walk
     // just goes on).
     if (aimWalking && !handover && !(preStart && InLocomotion(character))) {
@@ -1224,7 +1308,11 @@ static void ApplyControls(uint32_t padObj, uint32_t character) {
         static int pushFrames[8] = {};
         const int sl = slot & 7;
         const uint32_t actSt = Readable((void*)(character + ch::CurAction), 4) ? At<uint32_t>(character, ch::CurAction) : 0;
-        const bool stuck = actSt && Readable((void*)actSt, 4) && At<uint32_t>(actSt, 0) == 0x01044510 &&
+        // The knife attack shares the same vtable as the shot (KnifeAttack 0x27 reports 0x01044510), so the vtable alone
+        // was not enough: it caught the swing and overwrote its timer, which is what broke the quick slash.  The action id
+        // must be the shot (0x1E) as well.
+        const bool stuck = actSt && Readable((void*)actSt, 4) && At<uint32_t>(actSt, 0) == VaOf(0x01044510) &&
+                           At<uint32_t>(character, ch::ActionId) == 0x1E &&
                            Readable((void*)(actSt + 0x14), 1) && At<uint8_t>(actSt, 0x14) == 2 && !aimHeld;
         if (stuck) {
             // EVERY FRAME, not once per 0.5 s: the game accumulates [object+0x20] after this point, so a single write is
@@ -1254,6 +1342,90 @@ static void ApplyControls(uint32_t padObj, uint32_t character) {
         (void)pushFrames;
     }
     if (busyAction) out &= ~(P_LT | P_RT);
+    {
+        // While the knife is out the movement goes through the "the game walks straight ahead, the mod steers" path, which
+        // always leaves the direction at forward.  The direction bits are therefore written here from the stick, relative
+        // to the camera, so a side step or a back step works during the swing too.
+        const uint32_t aidK2 = At<uint32_t>(character, ch::ActionId);
+        if (aidK2 >= aid::KnifeBegin && aidK2 <= aid::KnifeAttack) {
+            const float mag = sqrtf(st.lx * st.lx + st.ly * st.ly);
+            if (mag >= 0.3f && fc.initialised) {
+                uint32_t bits = 0;
+                SetStickDirBits(bits, atan2f(-st.lx, st.ly) * 57.29578f, mag > 1.0f ? 1.0f : mag);
+                out = (out & ~(P_LS_DIRS | P_UP | P_DOWN | P_LEFT | P_RIGHT)) | bits;
+            }
+        }
+    }
+    {
+        // The thrown item: the twitch in the recovery comes from the leg layer and the direction bits fighting the
+        // animation.  Both are withheld until the throw action is really over.
+        static int throwTail[8] = {};
+        const int tq = slot & 7;
+        const uint32_t vtT = Readable((void*)(character + ch::CurAction), 4) ? At<uint32_t>(character + ch::CurAction, 0) : 0;
+        if (vtT == VaOf(0x0104456C) || vtT == VaOf(0x01044F38)) throwTail[tq] = 8;
+        else if (throwTail[tq] > 0) { --throwTail[tq]; }
+        g_throwTail = (throwTail[tq] > 0);
+        // Releasing the aim during the throw recovery is what makes it twitch; holding the button through the recovery
+        // does not.  So the release is deferred: while the thrown-item action plays the aim is kept, and it is let go on
+        // the first frame after the action is over.
+        static bool releasePending[8] = {};
+        if (vtT == VaOf(0x0104456C) || vtT == VaOf(0x01044F38)) { releasePending[tq] = true; out |= P_RT; }
+        else if (releasePending[tq]) { releasePending[tq] = false; out &= ~P_RT; }
+    }
+    {
+        // Identify the climbing state: when the aim key goes down, record the action and the ride/climb bits once.
+        static bool prevAim[8] = {};
+        const int aq = slot & 7;
+        const bool aimNow = (phys & P_LT) != 0;
+        if (aimNow && !prevAim[aq])
+            Log("aim down: aid=%02X ride=%08X 2D98=%02X", At<uint32_t>(character, ch::ActionId),
+                At<uint32_t>(character, 0x2D8C), At<uint8_t>(character, 0x2D98));
+        prevAim[aq] = aimNow;
+    }
+    {
+        // Diagnostic: what does the knife state actually write?  Prints the stick, the camera state and the final pad.
+        static int dbg[8] = {};
+        const int dq = slot & 7;
+        const uint32_t aidD = At<uint32_t>(character, ch::ActionId);
+        if (aidD >= aid::KnifeBegin && aidD <= aid::KnifeAttack) {
+            if ((++dbg[dq] % 15) == 0)
+                Log("knifeMove: aid=%02X lx=%.2f ly=%.2f fc=%d mag=%.2f out=%08X dirs=%04X", aidD, st.lx, st.ly,
+                    fc.initialised ? 1 : 0, sqrtf(st.lx * st.lx + st.ly * st.ly), out, out & 0xFFFF);
+        } else dbg[dq] = 0;
+    }
+    {
+        static uint32_t lastT[8] = {};
+        static int kdbg[8] = {};
+        const int dq2 = slot & 7;
+        const uint32_t vtD = Readable((void*)(character + ch::CurAction), 4) ? At<uint32_t>(character + ch::CurAction, 0) : 0;
+        if (vtD != lastT[dq2]) { lastT[dq2] = vtD; Log("act vt=%08X aid=%02X aimHeld=%d throwAim=%d", vtD, At<uint32_t>(character, ch::ActionId), (int)aimHeld, (int)g_throwAimHeld); }
+        const uint32_t aidD2 = At<uint32_t>(character, ch::ActionId);
+        if (aidD2 >= aid::KnifeBegin && aidD2 <= aid::KnifeAttack && (++kdbg[dq2] % 20) == 0)
+            Log("knifeState: aid=%02X stick=%.2f runGait=%d pace=%.2f", aidD2,
+                sqrtf(st.lx * st.lx + st.ly * st.ly), (int)runGait, pace);
+    }
+    // Thrown item: movement is blocked and the aim is held until the action is over, exactly as the original game does.
+    // Releasing here is what produced the twitch, and letting the legs run is what produced the forward drift.
+    if (thrownItem) {
+        out &= ~(P_LS_DIRS | P_UP | P_DOWN | P_LEFT | P_RIGHT);
+        out |= P_RT;
+    }
+    // Eight more frames after the thrown-item action is gone: the recovery pose is still playing, and taking input there
+    // is what made the body twitch.  Nothing is fed through in that short window.
+    {
+        static int tail[8] = {};
+        const int tq2 = slot & 7;
+        // The recovery pose is still playing for about half a second; accepting input there is what twitches the body.
+        // The window is widened and the aim is kept through it, so the character stays in one pose until the game hands
+        // control back on its own.
+        if (thrownItem) tail[tq2] = 30;
+        else if (tail[tq2] > 0) {
+            --tail[tq2];
+            out &= ~(P_LS_DIRS | P_UP | P_DOWN | P_LEFT | P_RIGHT);
+            out |= P_RT;
+        }
+    }
+    // Interactions, melee, vaults and climbs: the aim key must do nothing at all.
     on = out;
     At<uint32_t>(padObj, pp::Trg) = trg;
     At<uint32_t>(padObj, pp::Rel) = old & ~out;
