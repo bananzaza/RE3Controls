@@ -193,7 +193,7 @@ gamepad players are unaffected.
 ## Logging
 
 The build writes a few diagnostic lines to RE3Controls.log: `keyq:` (aim/fire key
-queries), `fire: timer=闂佺偨鍎哄▔?(the fire-action timer when the hold-off triggers) and
+queries), `fire: timer=闂備胶鍋ㄩ崕鍝勨枖?(the fire-action timer when the hold-off triggers) and
 `trace:` (a two-second sample after an aim release).  They are rate limited and can be
 ignored, or removed from the sources if you build it yourself.
 ## Fixes in mod64h (added after mod63x)
@@ -279,3 +279,7 @@ the direction bits only, switching the leg layer off, zeroing the stick at the s
 dead window, and restricting the window to the throw action): each one either kept the twitch or
 made the character unable to move at all.  The motion comes from the engine's own animation blend,
 which the mod cannot address from the pad side.
+### 1.9.4-mod104
+
+- Weapon switching no longer aims (and then reloads) by itself: aid 0x20 is the weapon change, and it is
+  no longer treated as the thrown item, so the mod no longer forces the gun-ready bit through a switch.

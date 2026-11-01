@@ -1172,7 +1172,9 @@ static void ApplyControls(uint32_t padObj, uint32_t character) {
     // the mod's own reload state (reloadMove) is never set, so the character stood still.  ReloadWalk is the switch.
     // Measured action ids (from the mod's own timeline): 0x20 = item use / throw start, 0x85 = the throw itself.
     const uint32_t aidThrowNow = At<uint32_t>(character, ch::ActionId);
-    const bool thrownItem = (aidThrowNow == 0x20 || aidThrowNow == 0x85);
+    // 0x20 is the WEAPON CHANGE.  Treating it as the thrown item forced P_RT through the switch, which is what made the
+    // character aim (and then reload) by itself right after changing weapons.  Only 0x85 is the throw.
+    const bool thrownItem = (aidThrowNow == 0x85);
     static int throwWin[8] = {};
     const int tw = slot & 7;
     throwWin[tw] = 0;

@@ -18,7 +18,7 @@ BEGIN
             VALUE "InternalName", "RE3Controls"
             VALUE "OriginalFilename", "xinput1_3.dll"
             VALUE "ProductName", "RE3Controls"
-            VALUE "ProductVersion", "1.9.4-mod103"
+            VALUE "ProductVersion", "1.9.4-mod104"
             VALUE "Comments", "Mod for Resident Evil 5 Gold Edition 1.2.0 (Steam). Forwards XInput to the system XInput1_4/9_1_0."
         END
     END
