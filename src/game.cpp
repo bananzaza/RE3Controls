@@ -538,8 +538,9 @@ static void ApplyControls(uint32_t padObj, uint32_t character) {
     // not cover - that is why aiming on a ladder still turned the character.
     const bool busyAction = ((aidGate >= 0x28 && aidGate <= 0x4D) || (aidGate >= 0x90 && aidGate <= 0x99) ||
                              (aidGate & 0x80000000u) != 0);
-    const bool aiming = ((phys & P_LT) != 0) && !busyAction;   // the aim would turn the character mid-action
-    const bool knife = (phys & P_LB) != 0;
+    const bool aiming = ((phys & P_LT) != 0) && !busyAction;
+    const bool knifeKey = ((phys & P_LB) != 0) && !busyAction;   // the knife is ignored during interactions too   // the aim would turn the character mid-action
+    const bool knife = knifeKey;
     // While a thrown item plays out the mod keeps treating the player as aiming, exactly as if the button were still held.
     // Every "aim ended" path (camera hand-back, facing, leg handover) is gated on this flag, and those are what made the
     // recovery twitch when the button was released early.  The pad bit alone was not enough - this is the internal state.
@@ -1008,6 +1009,7 @@ static void ApplyControls(uint32_t padObj, uint32_t character) {
     const uint32_t aidSt = At<uint32_t>(character, ch::ActionId);
     const bool knifeSt = (aidSt >= aid::KnifeBegin && aidSt <= aid::KnifeAttack);
     const bool moveSteer = ((reloadMove || action == plact::Reload) && c.reloadWalk && action == plact::Reload) ||
+                           changeMove;
                            ((action == plact::ReadyEnd || action == plact::Fire) && !aimHeld) || changeMove;
             if (stickMag >= 0.3f && fc.initialised && S.quickTurnT < 0 && (InLocomotion(character) || moveSteer || knifeSt)) {
                 // BackStep: toward the camera without running steps back, facing where the camera looks (the game's
@@ -1215,52 +1217,8 @@ static void ApplyControls(uint32_t padObj, uint32_t character) {
         walkX = 0.0f;
         walkY = backStep ? -stickMag : stickMag;
     }
-    static bool kKnifeRunOk = true;
-    // The knife: while the layer walks it also takes the stick away from the pad, so the direction has to be given to
-    // the layer in character space (camera-relative stick turned by the character yaw).  Without this the swing could
-    // only go forward.
-    {
-        const uint32_t aidW = At<uint32_t>(character, ch::ActionId);
-        kKnifeRunOk = true;
-        if (aidW >= aid::KnifeBegin && aidW <= aid::KnifeAttack && stickMag >= 0.3f && freeCam && fc.initialised) {
-            // No turning: the direction is handed to the layer in character space, so the character keeps facing where the
-            // swing put it and simply moves that way.
-            const float wantYaw = StickWorldYaw(fc, st.lx, st.ly);
-            const float rel = wantYaw - CharacterYaw(character);
-            const float m = stickMag > 1.0f ? 1.0f : stickMag;
-            walkX = -sinf(rel) * m;   // the layer uses the opposite X sign
-            walkY = cosf(rel) * m;
-            // The run clips only go forward: running is only used when the stick points ahead, otherwise the character
-            // walks in that direction (turning while swinging looked wrong).
-            kKnifeRunOk = (fabsf(rel) < 0.7f);
-        }
-    }
-    // The knife can run as well: with the run button held the layer is given the run gait and its speed.
-    const uint32_t aidR = At<uint32_t>(character, ch::ActionId);
-    const bool knifeRun = (aidR >= aid::KnifeBegin && aidR <= aid::KnifeAttack) && stickMag >= 0.3f && runIntent;
-    // The knife moves at the running speed in every direction; only the forward run uses the run clips (the others walk,
-    // because the run animation only exists for forward).
-    const bool knifeAny = (aidR >= aid::KnifeBegin && aidR <= aid::KnifeAttack) && stickMag >= 0.3f;
-    // The measurement (mod93) showed the knife got pace = 1.00, i.e. MoveSpeedFor(ch, 5) returned the WALK speed - so the
-    // slash moved at walking pace while asking for the run gait.  The game's run speed is only valid once its own
-    // locomotion has been entered, so a sane fallback is used when the read is not usable.
-    // No invented multiplier any more: it made the normal forward run twice as fast once the value was cached.  The knife
-    // now uses exactly the game's own walk and run speeds, chosen by the run input.
-    // Forward: the game's own walk/run speed.  Any other direction: the same speed the character has when aiming and
-    // walking in that direction, which is what was asked for.
-    const bool knifeFwd = kKnifeRunOk;   // computed above: the stick points ahead of the swing
-    const float knifeSpeed = knifeFwd ? MoveSpeedFor(character, runIntent ? 5 : 2)
-                                      : (runIntent ? c.aimWalkFastSpeed : c.aimWalkAnimSpeed);
-    const float paceUse = knifeAny ? knifeSpeed : pace;
     const bool aimWalking =
-        AimWalkUpdate(character, walkX, walkY, walkAllowed, paceUse, (float)dt, runGait || knifeRun, keepGait, kbm, preStart);
-    // Diagnostic for the "cannot run with the knife" report: what the swing is actually given.
-    if (knifeAny) {
-        static int nK = 0;
-        if ((++nK % 10) == 0)
-            Log("knife: aid=%02X stick=%.2f allow=%d pace=%.2f run=%d got=%d walk=%.2f",
-                aidR, stickMag, (int)walkAllowed, paceUse, (int)(runGait || knifeRun), (int)aimWalking, MoveSpeedFor(character, 2));
-    }
+        AimWalkUpdate(character, walkX, walkY, walkAllowed, pace, (float)dt, runGait, keepGait, kbm, preStart);
     // In the preStart frame the game is still walking: it keeps the stick (if it turns the action down, the walk
     // just goes on).
     if (aimWalking && !handover && !(preStart && InLocomotion(character))) {
@@ -1343,7 +1301,7 @@ static void ApplyControls(uint32_t padObj, uint32_t character) {
         }
         (void)pushFrames;
     }
-    if (busyAction) out &= ~(P_LT | P_RT);
+    if (busyAction) out &= ~(P_LT | P_RT | P_LB);
     {
         // While the knife is out the movement goes through the "the game walks straight ahead, the mod steers" path, which
         // always leaves the direction at forward.  The direction bits are therefore written here from the stick, relative

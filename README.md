@@ -283,3 +283,25 @@ which the mod cannot address from the pad side.
 
 - Weapon switching no longer aims (and then reloads) by itself: aid 0x20 is the weapon change, and it is
   no longer treated as the thrown item, so the mod no longer forces the gun-ready bit through a switch.
+
+---
+
+## 1.9.4-mod147 (final for this round)
+
+Verified in play:
+
+- Interactions, melee, vaults and climbs ignore the aim **and** the knife key (the knife used to be drawn and the
+  character turned in the middle of a scene interaction).
+- The knife keeps the older, confirmed-good handling: it walks and runs through the ordinary aim-walk path, with no
+  knife-specific speed or direction code of its own.
+- The thrown item is left entirely to the game: the character stands still for it and never twitches.
+- The gun no longer freezes after a shot; the empty-magazine reload and leaving the aim (ReadyEnd) stay walkable and
+  steerable; weapon switching does not aim by itself; shoulder swap, plain-gun zoom, camera-ray shots and the melee
+  camera are unchanged.
+
+Engine limits (documented, not mod bugs):
+
+- The quick slash (`knife_attack`, action 0x27) and item use (`item_use_my_*`, 0x61/0x62) lock movement inside the
+  engine: `0xB7A8F0` sets `ch+0x2D7C |= 0x80000000` and clears the move vector.  The mod cannot move the character in
+  those frames; clearing that bit only restores a forward step, and emulating the aim state breaks the direction.
+- The sniper scope keeps the game's own aim; the laser sight is drawn only on the pad path.
