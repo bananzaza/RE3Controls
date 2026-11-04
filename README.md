@@ -79,260 +79,90 @@ mods, as long as the copyright notice stays with it. `third_party/minhook/` keep
 
 ---
 
-## Additions in this fork (MXYLR)
+---
 
-Beyond upstream v1.9 and notencio's v1.9.4 fixes, this build adds:
+## What this build changes compared with the original game
 
-### Shoulder camera
+Everything below is a difference from a clean RE5 Gold Edition (Steam 1.2.0, 32-bit) with no mods.  Nothing here
+changes the game's files; it is a single `xinput1_3.dll` next to `re5dx9.exe`.
 
-| Input | Key |
+### Camera and aim
+
+| In this build | In the original game |
 |---|---|
-| Keyboard | **B** (`[Controls] ShoulderKey=B`, any letter A-Z) |
-| Gamepad | **RB** (**L3** when `RunButton=RB`) |
+| **Free camera** while walking and while aiming; the mouse turns the view, the character follows | fixed over-the-shoulder camera that only turns with the character |
+| **Shoulder swap at any time**, keyboard **B** (`[Controls] ShoulderKey`, any letter) or pad **RB** (L3 when `RunButton=RB`), including in cover and while walking | no swap at all |
+| **Plain-gun zoom** while aiming: **F** zooms in, **C** zooms out (`[Zoom] ZoomFovStep=-14`, `ZoomMaxStep=2`) | one fixed zoom level per weapon |
+| **Scoped walking**: move with the sniper scope raised (`[Zoom] ScopeWalk=1`) | the character is frozen while scoped |
+| Aim pitch is inherited from the free camera and is not pulled back when the aim ends | aim pitch is fixed per stance |
+| Shots follow the **camera ray**, including the laser sight | shots follow the weapon's own direction |
+| Melee plays on the **game's own fixed camera** (`[Camera] StockMeleeCamera=1`) so the animations read correctly; the knife stance keeps the mod camera | all actions on the game camera |
 
-- The swap works **at any time**, aiming or not (`[Camera] ShoulderSwapAlways=1`).
-  Set it to `0` for the old behaviour (swap only while aiming, RB acts as the
-  knife outside the aim).
-- Outside the aim the knife stays on the physical **LB**, so giving RB to the
-  shoulder does not remove the knife.
-- In a scope the key is the `ScopeWalk` zoom button instead.
-- One wanted side ("the character stands on the left of the screen", default
-  left) drives both views:
-  - the walking camera uses it directly;
-  - the game's own aim poses are mirrored only when needed.
-  The game aims with a side of its own per character (Chris and Sheva differ), so
-  that side is measured at the start of each aim 闂?three consecutive frames with
-  the same sign, never while mirroring 闂?and remembered. The log prints it once:
-  `shoulder: game aims with the character on the left (pose x -40.0)`.
-- The key is read raw, so it is independent of the game's own button bindings,
-  and a press is consumed for that frame (a key that is also bound to another
-  action cannot toggle the side twice).
-- `ShoulderAuto`, `ShoulderLeftKinds` and `ShoulderGameLeftKinds` from earlier
-  test builds are ignored now.
-### Plain-gun zoom
+### Movement
 
-While aiming a gun (not a scope) the keyboard zooms:
-
-| Key | Action |
+| In this build | In the original game |
 |---|---|
-| **F** | zoom in (one step) |
-| **C** | zoom out |
+| **Aim walking**: move while aiming a gun or holding the knife (`GunWalk=1`, `KnifeWalk=1`) | standing still while aiming |
+| **Reload and weapon switch on the move** (`ReloadWalk=1`, `SwitchWalk=1`), including the game's own automatic reload when a magazine runs out | both force the character to stop |
+| Steering continues while the gun goes down (`ReadyEnd`) and right after a shot | direction is locked for those actions |
 
-`[Aim] ZoomKeys=1`, `ZoomFovStep=-14` (fov degrees per step), `ZoomMaxStep=2`.
-The level resets when the aim ends, the sniper scope keeps its own zoom, and
-gamepad players are unaffected.
+### Weapons
 
-### Earlier fixes kept in this fork
+| In this build | In the original game |
+|---|---|
+| **No frozen gun after a shot**: single-shot weapons and the last round of a magazine return control immediately (the fire action's own timer is held off) | the character stays locked in the fire stance for a while |
+| **Weapon switching does not aim or reload by itself** | a switch can force the ready state |
 
-- The sniper scope no longer has its mouse input zeroed by the mod (it is drawn
-  by the weapon camera, which the mod does not control).
-- Scoped walking is on by default (`ScopeWalk=1`).
-- The quick knife slash can be turned with the mouse / right stick.
-- Aim pitch is inherited from the free camera, and the view no longer snaps back
-  to the pre-aim pitch after aiming.
+### Knife
+
+| In this build | In the original game |
+|---|---|
+| The **knife can be turned** while slashing, and the character keeps walking/running with the knife out (through the ordinary aim-walk path) | the knife locks the facing and the movement |
+| Faster, movement-preserving knife stances | knife stance stops the character |
+
+### Input robustness (no action at the wrong moment)
+
+| In this build | In the original game / earlier builds |
+|---|---|
+| The **aim and the knife key do nothing** during melee, executions, grabs, vaults, climbs, damage reactions and scripted actions - for **every** character, because one classifier (`aidc::Locked`) decides instead of per-range lists | the mod used to turn the character toward the camera and draw the knife in the middle of those animations |
+| The **character never raises the gun by itself**: the ready bit is written only when the player aims | older builds forced the ready state during a throw and after a reaction |
+| Being hit does **not** trigger a reload or an aim | older builds re-sent the latched keys after a reaction |
+| The thrown item is left entirely to the game: the character stands still and does not twitch during the recovery | older builds fought the throw animation |
+
+### Known engine limits (not mod bugs)
+
+- **Quick slash and item use cannot move.** `knife_attack` (0x27) and `item_use_my_*` (0x61/0x62) raise a movement lock
+  inside the engine (`0xB7A8F0`: `or [ch+0x2D7C], 0x80000000` plus a cleared move vector).  Clearing that bit restores
+  only the animation's own forward step; emulating the aim state changes the direction handling and the throw, so it is
+  not done.  Holding the aim button still allows the slash to move, exactly as in the original game.
+- The **sniper scope** keeps the game's own aim: its view is drawn by the weapon camera and the fields the mod can
+  write do not reach it.
+- The **laser sight** is drawn by the engine only on the pad path; a keyboard player gets the crosshair.
+- Five hooks cannot be installed where RE5Fix has already patched the entries (camera ctrl, bind slot, camera aim ray,
+  pad aim, reticle request).  The mod works without them.
 
 ---
 
-## Known issues in this build
-
-- **Sniper scope aiming.** The scope view is drawn by the weapon camera (`uCameraWep`)
-  and uses that camera's own state.  The shot point (`ch+0x2700`), the aim point
-  (`ch+0x2870`) and the pad aim input all fail to reach it, and writing the
-  character's aim state (`ch+0x2908/+0x290C`) every frame freezes its pitch because
-  those fields are the game's pitch integrator.  The scope therefore starts on the
-  game's own direction instead of the free camera's.  `[Zoom] ScopeLook` stays 0.
-- **Knife swing direction.** The aim point and the facing are written while the
-  knife is out (the point every frame, the facing on every action id change), which
-  fixes most swings, but the very first swing after readiness can still go to the
-  character's old front, and the game's own melee assist may pull a swing toward a
-  nearby enemy.
-- Five hooks cannot be installed where RE5Fix patched the entries (camera ctrl,
-  bind-slot, camera aim ray, pad aim, reticle request).  The mod works without them;
-  the leg-layer mask is applied at setMotion instead of in the bind callback.
 ## Defaults in this build
 
 | Setting | Value |
 |---|---|
 | Shoulder | keyboard **B** (`[Controls] ShoulderKey`), pad **RB** (L3 with `RunButton=RB`), any time |
-| Plain-gun zoom | **F** in, **C** out, `[Zoom] ZoomFovStep=-20`, `ZoomMaxStep=3` |
-| Scoped walking | `ScopeWalk=1` (zoom on RB + stick) |
+| Plain-gun zoom | **F** in, **C** out, `[Zoom] ZoomFovStep=-14`, `ZoomMaxStep=2` |
+| Scoped walking | `ScopeWalk=1` |
 | Reload / switch on the move | `ReloadWalk=1`, `SwitchWalk=1` |
 | Aim walking | `GunWalk=1`, `KnifeWalk=1` |
 | Free camera | `FreeCamera=1`, `Shoulder=45`-`60`, `AimDistance=100` |
----
-
-## Fixes added in this fork (MXYLR), on top of 1.9.4
-
-- **Shoulder swap works everywhere**: keyboard B ([Controls] ShoulderKey) / pad RB at any
-  time, including low cover and wall cover (the game's cover camera is shifted sideways).
-- **Plain-gun zoom**: F in, C out while aiming ([Zoom] ZoomFovStep=-20, ZoomMaxStep=3).
-- **Aim**: the mouse is not zeroed while aiming; shots follow the camera ray; the aim
-  pitch is handed over as an absolute value on the aim press.
-- **No frozen gun after a shot**: the game's fire action waits on a per-object timer
-  (Fire::update, phase 2, `[object+0x20]`).  The mod holds that timer above the
-  threshold while the player is not aiming, so the stance and movement come back at
-  once instead of staying frozen (single-shot weapons, and right after a magazine runs
-  out).
-- **Reload on the move covers the game's own reload**: when a magazine is empty the
-  game reloads by itself; walking and steering are enabled for that action too.
-- **Steering while the gun goes down**: ReadyEnd and Fire are steerable as well, so the
-  character no longer keeps a fixed direction right after leaving the aim.
-- **Melee uses the game's own fixed camera** ([Camera] StockMeleeCamera=1); the knife
-  stance stays on the mod's camera so it can still be turned.
-
-## Known issues in this build
-
-- **Mercenaries countdown**: for a moment after the countdown ends the character can
-  move on its own (the scripted state keeps the pad's direction bits).  Being tracked.
-- **Sniper scope**: the scope view is drawn by the weapon camera and keeps the game's
-  own aim; the fields the mod can write (shot point, aim point, pad input) do not reach
-  it.
-- **Laser sight is pad-only**: the engine only draws it on the pad path; a keyboard
-  player gets the crosshair.
 
 ## Logging
 
-The build writes a few diagnostic lines to RE3Controls.log: `keyq:` (aim/fire key
-queries), `fire: timer=闂備胶鍋ㄩ崕鍝勨枖?(the fire-action timer when the hold-off triggers) and
-`trace:` (a two-second sample after an aim release).  They are rate limited and can be
-ignored, or removed from the sources if you build it yourself.
-## Fixes in mod64h (added after mod63x)
+The build writes a few diagnostic lines to `RE3Controls.log` next to the game: `keyq:` (aim/fire key queries), `fire:`
+(the fire-action timer when the hold-off triggers), `trace:` (a short sample after an aim release) and the probe lines
+`dmg:` / `blendfail:` / `layerfail:` used while tracking an action.  They are rate limited and can be ignored; the
+sources can be built without them.
 
-- **Grenade throw no longer locks the character.**  A probe showed the thrown-item
-  action (`0x01044F38`, action id `0x57`) stalls exactly like the shot: phase 2,
-  waiting on the timer at `[object+0x20]`.  The same hold-off now covers it, so after
-  a throw the aim can be cancelled again and the character does not twitch when you
-  move.
-- **Leg layer hysteresis**: it stays enabled for 8 frames once allowed, so a
-  borderline action no longer toggles it at frame rate.
-- **Mercenaries countdown**: the movement seen after the countdown was a movement key
-  held before control was handed back, not a stuck state - releasing the key stops the
-  character.  No code change.
-- The diagnostic `keyq:` probe was removed.
+## Credits
 
-Still open: using a first-aid spray keeps the character in place (that action is not in
-the walkable set yet).
-## Known limitation: throwing an item and releasing the aim immediately
-
-Throwing a grenade (aim + fire) ends in the game's own `Fire` action and then plays a
-recovery that carries the character forward by **animation root motion**.  Measurements
-made while investigating it:
-
-- the action chain itself is fine (`0x0104456C` phase 1 -> 2 -> 3, then `Wait`);
-- while the character slides, the pad is empty (`padOn = 0`), so the movement is not
-  input-driven;
-- none of the sixteen floats around the character position holds a velocity: the
-  position changes but every neighbouring field stays constant, i.e. the displacement is
-  applied by the model/animation layer, not by a field we can clear.
-
-Reverting the aim during that recovery makes the two poses fight (visible twitch).
-Forcing the action to end, or freezing the position, either breaks the action state
-machine or stops the player's own movement, so all of those were reverted.
-
-**Workaround**: wait for the recovery to finish (about 0.4 s) before letting go of the
-aim button.  This is the only known-safe behaviour; the sources are back at the released
-`v1.9.4-mod63x` state.
-## Stable build: 1.9.4-mod67
-
-Only fixes that were verified in play are in this build:
-
-- **Picking items up no longer freezes the game.** The player-pad hook created its critical section lazily and
-  then spun on `while (init != 2) Sleep(0)`, which could hang for ever on the path taken while picking an item up.
-  The section is now created at start-up and there is no wait at all.
-- **The aim button does nothing while a melee, a vault or an interaction plays.** It used to turn the character
-  toward the camera mid-animation; `aiming` is now gated at the source for those actions and the pad bits are
-  stripped as a second net.
-- **The knife attack no longer fights the leg layer**, so the character can turn again while slashing.
-- Everything else is the released `v1.9.4-mod63x` behaviour: fire-cancel and movement after a shot, walking and
-  steering during an empty-magazine reload, steering while the gun goes down, shoulder swap, plain-gun zoom,
-  melee on the game's own camera.
-
-### Known issues (not fixed, with the workaround)
-
-- **Quick slash on the knife key (V) does not come out.** The game raises the knife (KnifeBegin) but never
-  reaches the attack action from that entry point in this remap. Holding the aim button and then using the attack
-  button works and is the workaround. Measurements: the action chain stays at `0x22` when only the knife key is
-  used, and re-aiming/writing the aim point on the attack action is what lets it reach `0x27` - but that write also
-  interrupts the swing.
-- **Throwing an item and releasing the aim immediately**: the throw's recovery carries the character forward by
-  animation root motion. Waiting for the recovery to finish before letting go of the aim avoids the twitch.
----
-
-## Changes in 1.9.4-mod103
-
-- **Knife sprint**: holding the run input during a slash moves at the game's own run speed in the
-  forward direction, and at the aim-walk speed in every other direction.  No invented multiplier -
-  the previous attempt (walk speed x 2.6) made the ordinary forward run twice as fast.
-- **Knife swing no longer stalls**: it feeds the leg layer (it used to fight it), so the swing can
-  be moved and steered instead of freezing the character.
-- **Weapon switching does not stutter**: aid 0x20 is the weapon change, not the throw, and is no
-  longer treated as a thrown item.
-- **Aim is ignored during interactions, melee, vaults and climbs** (busy action range plus the
-  0x80000000 sentinel).
-- **Thrown item holds the character still**: the stick is withheld and the gun stays raised while
-  the thrown-item action plays, so the character does not walk off during it.
-
-### Known issue
-
-The legs twitch while the thrown item plays out.  Five different approaches were tried (clearing
-the direction bits only, switching the leg layer off, zeroing the stick at the source, a 30 frame
-dead window, and restricting the window to the throw action): each one either kept the twitch or
-made the character unable to move at all.  The motion comes from the engine's own animation blend,
-which the mod cannot address from the pad side.
-### 1.9.4-mod104
-
-- Weapon switching no longer aims (and then reloads) by itself: aid 0x20 is the weapon change, and it is
-  no longer treated as the thrown item, so the mod no longer forces the gun-ready bit through a switch.
-
----
-
-## 1.9.4-mod147 (final for this round)
-
-Verified in play:
-
-- Interactions, melee, vaults and climbs ignore the aim **and** the knife key (the knife used to be drawn and the
-  character turned in the middle of a scene interaction).
-- The knife keeps the older, confirmed-good handling: it walks and runs through the ordinary aim-walk path, with no
-  knife-specific speed or direction code of its own.
-- The thrown item is left entirely to the game: the character stands still for it and never twitches.
-- The gun no longer freezes after a shot; the empty-magazine reload and leaving the aim (ReadyEnd) stay walkable and
-  steerable; weapon switching does not aim by itself; shoulder swap, plain-gun zoom, camera-ray shots and the melee
-  camera are unchanged.
-
-Engine limits (documented, not mod bugs):
-
-- The quick slash (`knife_attack`, action 0x27) and item use (`item_use_my_*`, 0x61/0x62) lock movement inside the
-  engine: `0xB7A8F0` sets `ch+0x2D7C |= 0x80000000` and clears the move vector.  The mod cannot move the character in
-  those frames; clearing that bit only restores a forward step, and emulating the aim state breaks the direction.
-- The sniper scope keeps the game's own aim; the laser sight is drawn only on the pad path.
-
-
-## 1.9.4-mod164
-
-- **One action classifier.**  Every subsystem used to carry its own list of "busy" action ids and each list was
-  incomplete for some character (Excella's melee is 0xAC, which no range covered).  `aidc::Locked` / `aidc::Melee` in
-  `re5.h` now decide for all of them, so the aim and the knife key are ignored during *every* character's melee,
-  execution, grab, damage reaction or scripted action.
-- **The aim no longer raises itself.**  Four `out |= P_RT` writes (left over from the thrown-item experiments) forced
-  the ready state; the character now aims only when the player does.
-- **Melee -> aim no longer sticks.**  A release-wait added for an earlier symptom required every key to be released
-  before the aim was accepted again, which blocked the aim while the button was held.  Removed; the busy test alone
-  does the job.
-- **Motion-set substitution for the leg layer.**  With the knife out some characters (Barry, Mercenaries Reunion) get a
-  motion set that holds no locomotion clips; the layer now substitutes a working set once and remembers it instead of
-  retrying the failing one every frame (that retry was the stutter).
-
-
-## 1.9.5
-
-- **One action classifier.**  Every subsystem used to carry its own list of "busy" action ids and each list was
-  incomplete for some character (Excella's melee is 0xAC, which no range covered).  `aidc::Locked` / `aidc::Melee` in
-  `re5.h` now decide for all of them, so the aim and the knife key are ignored during *every* character's melee,
-  execution, grab, damage reaction or scripted action.
-- **The aim no longer raises itself.**  Four `out |= P_RT` writes (left over from the thrown-item experiments) forced
-  the ready state; the character now aims only when the player does.
-- **Melee -> aim no longer sticks.**  A release-wait added for an earlier symptom required every key to be released
-  before the aim was accepted again, which blocked the aim while the button was held.  Removed.
-- **Motion-set substitution for the leg layer.**  With the knife out some characters (Barry, Mercenaries Reunion) get a
-  motion set that holds no locomotion clips; the layer substitutes a working set once and remembers it instead of
-  retrying the failing one every frame (that retry was the stutter).
+- Original **RE3Controls** by *bananzaza* (MIT) and the 1.9.x work by *notencio*.
+- **MinHook** by Tsuda Kageyu (BSD 2-Clause), bundled in `third_party/minhook`.
+- This fork by *MXYLR*: free camera, shoulder swap, zoom, movement during actions, and the fixes listed above.
