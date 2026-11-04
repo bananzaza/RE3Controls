@@ -134,18 +134,14 @@ changes the game's files; it is a single `xinput1_3.dll` next to `re5dx9.exe`.
 
 ### Known engine limits (not mod bugs)
 
-These come from the engine itself.  The mod does **not** try to work around them, because every attempt to do so
-produced a worse regression (a locked direction, a broken throw, or a frozen scope).
+Only what is left after the work in this fork.  Everything that could be solved without breaking something else has
+been solved; these three are the remainder, and each one is a deliberate choice rather than a missing fix.
 
 | Limit | Why, and what it looks like | What the player can do |
 |---|---|---|
-| **No movement during the quick slash or during item use** (first-aid spray and the like) | When such an action starts the engine runs `0xB7A8F0`: `or [character+0x2D7C], 0x80000000` and clears the move vector.  That is a movement lock.  Clearing the bit restores only the animation's own forward step, and emulating the aim state changes how the direction is interpreted and breaks the throw | Play it as in the original game: with the aim button held the slash moves normally |
-| **The sniper scope keeps the game's own aim** | The scope view is drawn by the weapon camera; the fields the mod can write (shot point, aim point, pad input) never reach it, and writing the aim state every frame freezes its pitch | Aim inside the scope the way the original game does.  Scoped **walking** still works (`ScopeWalk=1`) |
-| **The laser sight is drawn only on the pad path** | The engine draws it there only | Keyboard players get the crosshair (`Crosshair=1`) |
-| **Five hooks cannot be installed** | RE5Fix has already patched those entries (camera control, bind slot, camera aim ray, pad aim, reticle request).  The mod works without them: the leg-layer mask is applied at `setMotion` instead of in the bind callback | Nothing - no feature depends on them |
-
-> These are design-level limits of the game, not defects of the mod.  The mod's choice is to keep the original
-> behaviour playable rather than to force a rewrite that breaks something else.
+| **The quick slash and item use lock the direction** | When such an action starts the engine runs `0xB7A8F0`: `or [character+0x2D7C], 0x80000000` and clears the move vector.  The mod releases that bit, which restores the forward step, but the engine keeps interpreting the stick in character space for those actions, so sideways and backwards movement cannot be expressed without entering the aim state (which breaks the throw and the direction handling) | Keep the aim button held: the slash then moves in every direction, exactly like the original game |
+| **The sniper scope keeps the game's own aim** | The scope view is drawn by the weapon camera; the fields the mod can write (shot point, aim point, pad input) never reach it, and driving the aim state per frame freezes the scope pitch | Scoped **walking** works (`ScopeWalk=1`); aim inside the scope as in the original game |
+| **The laser sight is pad-only** | The engine draws it on the pad path only.  The camera-ray shot point and the crosshair in this fork are the keyboard/mouse equivalent | Keyboard/mouse players get the crosshair (`Crosshair=1`, size and kick adjustable) |
 
 ---
 
