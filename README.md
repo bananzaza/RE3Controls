@@ -305,3 +305,34 @@ Engine limits (documented, not mod bugs):
   engine: `0xB7A8F0` sets `ch+0x2D7C |= 0x80000000` and clears the move vector.  The mod cannot move the character in
   those frames; clearing that bit only restores a forward step, and emulating the aim state breaks the direction.
 - The sniper scope keeps the game's own aim; the laser sight is drawn only on the pad path.
+
+
+## 1.9.4-mod164
+
+- **One action classifier.**  Every subsystem used to carry its own list of "busy" action ids and each list was
+  incomplete for some character (Excella's melee is 0xAC, which no range covered).  `aidc::Locked` / `aidc::Melee` in
+  `re5.h` now decide for all of them, so the aim and the knife key are ignored during *every* character's melee,
+  execution, grab, damage reaction or scripted action.
+- **The aim no longer raises itself.**  Four `out |= P_RT` writes (left over from the thrown-item experiments) forced
+  the ready state; the character now aims only when the player does.
+- **Melee -> aim no longer sticks.**  A release-wait added for an earlier symptom required every key to be released
+  before the aim was accepted again, which blocked the aim while the button was held.  Removed; the busy test alone
+  does the job.
+- **Motion-set substitution for the leg layer.**  With the knife out some characters (Barry, Mercenaries Reunion) get a
+  motion set that holds no locomotion clips; the layer now substitutes a working set once and remembers it instead of
+  retrying the failing one every frame (that retry was the stutter).
+
+
+## 1.9.5
+
+- **One action classifier.**  Every subsystem used to carry its own list of "busy" action ids and each list was
+  incomplete for some character (Excella's melee is 0xAC, which no range covered).  `aidc::Locked` / `aidc::Melee` in
+  `re5.h` now decide for all of them, so the aim and the knife key are ignored during *every* character's melee,
+  execution, grab, damage reaction or scripted action.
+- **The aim no longer raises itself.**  Four `out |= P_RT` writes (left over from the thrown-item experiments) forced
+  the ready state; the character now aims only when the player does.
+- **Melee -> aim no longer sticks.**  A release-wait added for an earlier symptom required every key to be released
+  before the aim was accepted again, which blocked the aim while the button was held.  Removed.
+- **Motion-set substitution for the leg layer.**  With the knife out some characters (Barry, Mercenaries Reunion) get a
+  motion set that holds no locomotion clips; the layer substitutes a working set once and remembers it instead of
+  retrying the failing one every frame (that retry was the stutter).
