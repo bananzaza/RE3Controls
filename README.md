@@ -120,7 +120,9 @@ changes the game's files; it is a single `xinput1_3.dll` next to `re5dx9.exe`.
 
 | In this build | In the original game |
 |---|---|
-| The **knife can be turned** while slashing, and the character keeps walking/running with the knife out (through the ordinary aim-walk path) | the knife locks the facing and the movement |
+| The **knife can be turned** while slashing, the character keeps walking/running with the knife out (through the ordinary
+aim-walk path), and the **quick slash can be moved and steered** - the engine's movement lock is released for it
+| the knife locks the facing and the movement |
 | Faster, movement-preserving knife stances | knife stance stops the character |
 
 ### Input robustness (no action at the wrong moment)
@@ -134,12 +136,12 @@ changes the game's files; it is a single `xinput1_3.dll` next to `re5dx9.exe`.
 
 ### Known engine limits (not mod bugs)
 
-Only what is left after the work in this fork.  Everything that could be solved without breaking something else has
-been solved; these three are the remainder, and each one is a deliberate choice rather than a missing fix.
+Only what is left after the work in this fork.  The quick slash, the item-use lock, the aim/knife gating and the
+thrown-item twitch were all solved here; the two below are the remainder, and each one is a deliberate choice rather
+than a missing fix.
 
 | Limit | Why, and what it looks like | What the player can do |
 |---|---|---|
-| **The quick slash and item use lock the direction** | When such an action starts the engine runs `0xB7A8F0`: `or [character+0x2D7C], 0x80000000` and clears the move vector.  The mod releases that bit, which restores the forward step, but the engine keeps interpreting the stick in character space for those actions, so sideways and backwards movement cannot be expressed without entering the aim state (which breaks the throw and the direction handling) | Keep the aim button held: the slash then moves in every direction, exactly like the original game |
 | **The sniper scope keeps the game's own aim** | The scope view is drawn by the weapon camera; the fields the mod can write (shot point, aim point, pad input) never reach it, and driving the aim state per frame freezes the scope pitch | Scoped **walking** works (`ScopeWalk=1`); aim inside the scope as in the original game |
 | **The laser sight is pad-only** | The engine draws it on the pad path only.  The camera-ray shot point and the crosshair in this fork are the keyboard/mouse equivalent | Keyboard/mouse players get the crosshair (`Crosshair=1`, size and kick adjustable) |
 
