@@ -94,12 +94,27 @@ changes the game's files; it is a single `xinput1_3.dll` next to `re5dx9.exe`.
 | In this build | In the original game |
 |---|---|
 | **Free camera** while walking and while aiming; the mouse turns the view, the character follows | fixed over-the-shoulder camera that only turns with the character |
-| **Shoulder swap at any time**, keyboard **B** (`[Controls] ShoulderKey`, any letter) or pad **RB** (L3 when `RunButton=RB`), including in cover and while walking | no swap at all |
+| **Shoulder swap at any time**: keyboard **B** (`[Controls] ShoulderKey`, any letter), pad **RB/L3** while aiming, including in cover and while walking | no swap at all |
 | **Plain-gun zoom** while aiming: **F** zooms in, **C** zooms out (`[Zoom] ZoomFovStep=-14`, `ZoomMaxStep=2`) | one fixed zoom level per weapon |
 | **Scoped walking**: move with the sniper scope raised (`[Zoom] ScopeWalk=1`) | the character is frozen while scoped |
 | Aim pitch is inherited from the free camera and is not pulled back when the aim ends | aim pitch is fixed per stance |
 | Shots follow the **camera ray**, including the laser sight | shots follow the weapon's own direction |
 | Melee plays on the **game's own fixed camera** (`[Camera] StockMeleeCamera=1`) so the animations read correctly; the knife stance keeps the mod camera | all actions on the game camera |
+
+
+### Controls added by this build
+
+| Key | What it does | Notes |
+|---|---|---|
+| **B** | shoulder swap (`[Controls] ShoulderKey`, any letter) | works at any time: walking, aiming, in cover |
+| **T** | crosshair / laser switch (`CrosshairKey`) | at any time |
+
+Keys the game already has keep their meaning; two of them are used a little more widely than before:
+
+- the game's own **scope zoom keys** (F in, C out) now also zoom a plain gun while aiming (`[Zoom] ZoomKeys=1`);
+- the game's own **locate-partner** key does nothing while aiming (so it cannot fight the aim camera), and the **map**
+  key is passed straight through.  On a gamepad they are the pad's own buttons (LB locate, RB map); the shoulder button
+  swaps the shoulder while aiming.
 
 ### Movement
 

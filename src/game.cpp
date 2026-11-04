@@ -596,10 +596,12 @@ static void ApplyControls(uint32_t padObj, uint32_t character) {
     // "locate partner" button, which the pad path below maps to partnerBit and would flip the same value a second time
     // in the same frame (two flips = no visible change; three presses in the log all reported the same side).
     bool keyToggled = false;
+    bool shoulderKeyDown = false;
     if (c.shoulderSwapAlways && c.shoulderKey[0] && !At<uint8_t>(character, ch::Scope)) {
         const int vk = toupper((unsigned char)c.shoulderKey[0]);
         const bool down = vk > 0 && (GetAsyncKeyState(vk) & 0x8000) != 0;
         static bool keyPrev = false;
+        shoulderKeyDown = down;
         if (down && !keyPrev) {
             g_charLeftSide = !g_charLeftSide;
             keyToggled = true;
@@ -607,6 +609,12 @@ static void ApplyControls(uint32_t padObj, uint32_t character) {
                 g_charLeftSide ? "left" : "right", (int)!g_charLeftSide, (int)g_charLeftSide);
         }
         keyPrev = down;
+    }
+    // The same physical key can also be the game's "locate partner" binding (B is one of them on the keyboard).  While
+    // it is held for the shoulder, the locate action is withheld, so one press does one thing.
+    if (shoulderKeyDown) {
+        phys &= ~partnerBit;
+        S.prevPhys &= ~partnerBit;
     }
 
     // Derive the two mechanisms from the wanted side, every frame.  The contexts below (mounted guns, the original
@@ -687,13 +695,29 @@ static void ApplyControls(uint32_t padObj, uint32_t character) {
         // works whether aiming or not, like a modern TPS: the physical LB keeps the knife outside the aim and the
         // RB-to-knife forwarding is gone.  In a scope the key stays the ScopeWalk zoom button.
         if (c.shoulderSwapAlways) {
-            if (!keyToggled && (physTrg & partnerBit) && !At<uint8_t>(character, ch::Scope)) { g_charLeftSide = !g_charLeftSide; }
+            // Pad: the physical button is also the game's locate-partner.  Swapping only while aiming keeps both usable:
+            // outside the aim the button goes back to the game, so the partner camera still works.  The keyboard key
+            // (ShoulderKey, B by default) swaps at any time and has no conflict.
+            // Keyboard players swap with ShoulderKey (B); this branch is the pad button only.  Without the !kbm guard a
+            // keyboard locate-partner press (which maps to the same pad bit) swapped the shoulder while aiming.
+            if (!kbm && !keyToggled && (physTrg & partnerBit) && aimHeld && !At<uint8_t>(character, ch::Scope)) {
+                g_charLeftSide = !g_charLeftSide;
+                out &= ~partnerBit;   // consumed: do not also trigger whatever the game binds to this button
+            }
+            // Outside the aim the button is not consumed by the mod.  It is NOT forwarded either: with RunButton=L3 the
+            // pad bit involved is the game's map button, and forwarding it opened the map instead of locating the partner.
         } else if (aimHeld) {
-            if (!keyToggled && (physTrg & partnerBit) && !At<uint8_t>(character, ch::Scope)) { g_charLeftSide = !g_charLeftSide; }
+            if (!kbm && !keyToggled && (physTrg & partnerBit) && !At<uint8_t>(character, ch::Scope)) { g_charLeftSide = !g_charLeftSide; }
         } else if (phys & partnerBit) {
             out |= P_LB;
         }
-        if (phys & P_BACK) out |= P_RB;  // map
+        // Map and locate-partner are separate actions in the engine (0x15 and 0x0B, measured) and both used to be
+        // dropped: map was sent to the pad's RB and locate was not sent at all.  Each now goes to the pad button the
+        // game uses for it.
+        if (phys & P_BACK) out |= P_RB;          // map    -> the pad's RB (measured: RB opens the map)
+        // Locate partner is only forwarded outside the aim: while aiming it must do nothing (holding the aim and looking
+        // at the partner fight over the same camera).
+        if ((phys & partnerBit) && !aiming) out |= P_LB;   // locate partner -> the pad's LB (RB is the map here)
         if (phys & P_Y) out |= P_Y;
         if (phys & P_B) out |= P_B;
         // R3 where the game has a use for it: in the aim (RPG-7 NVS night vision; StickClicks) and for Wesker outside
@@ -1386,18 +1410,6 @@ static void ApplyControls(uint32_t padObj, uint32_t character) {
         else if (tail[tq2] > 0) {
             --tail[tq2];
             out &= ~(P_LS_DIRS | P_UP | P_DOWN | P_LEFT | P_RIGHT);
-        }
-    }
-    // DAMAGE PROBE (read-only): what the engine state looks like while a damage reaction plays and just after it.
-    {
-        const uint32_t aidD = At<uint32_t>(character, ch::ActionId);
-        static uint32_t lastD = 0xFFFFFFFF;
-        if (aidD != lastD) {
-            lastD = aidD;
-            const uint32_t lockBits = At<uint32_t>(character, 0x2D7C);
-            const uint32_t gunUp = At<uint32_t>(character, 0x2760);
-            Log("dmg: aid=%02X lock=%08X gun=%d out=%08X phys=%08X",
-                aidD, lockBits, (int)(gunUp & 1), out, phys);
         }
     }
     // Interactions, melee, vaults and climbs: the aim key must do nothing at all.

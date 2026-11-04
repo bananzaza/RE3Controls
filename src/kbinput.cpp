@@ -28,6 +28,7 @@
 //
 // A pad player who nudges the mouse is not thrown into keyboard mode: a mouse-motion-only switch needs
 // MouseSwitchCounts raw counts within about a quarter of a second (the game's own rule is 2 counts in one frame).
+#include <cstdio>
 #include "common.h"
 #include "re5.h"
 #include "config.h"

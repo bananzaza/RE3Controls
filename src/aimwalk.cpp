@@ -1082,17 +1082,6 @@ bool AimWalkUpdate(uint32_t ch, float stickX, float stickY, bool walkAllowed, fl
         const uint16_t fb = (uint16_t)((bank << 8) | (L->back ? 0x07 : 0x01));
         const uint16_t lr = (uint16_t)((bank << 8) | (L->right ? 0x0D : 0x0C));
         if (!PlayBlend(*L, fb, lr, w, rate)) {
-            // PROBE: which weapon set / clip set refused the blend (the Barry knife stutter and the Excella melee one).
-            {
-                static double lastLog = 0;
-                const double now = Now();
-                if (now - lastLog > 1.0) {
-                    lastLog = now;
-                    Log("blendfail: aid=%02X stance=%04X bank=%02X fb=%04X lr=%04X noBlend=%02X good=%02X",
-                        At<uint32_t>(ch, ch::ActionId), stance, (uint32_t)bank, (uint32_t)fb, (uint32_t)lr,
-                        (uint32_t)L->noBlendBank, (uint32_t)L->goodBank);
-                }
-            }
             // This character/stage has no strafe or back clips in this motion set (Barry's knife set is one example).
             // Retry with the last set that did have them, instead of dropping the layer for this frame - dropping it is
             // what restarted the run every frame and produced the stutter.
@@ -1109,15 +1098,6 @@ bool AimWalkUpdate(uint32_t ch, float stickX, float stickY, bool walkAllowed, fl
     } else if (!PlayLayer(*L, want, rate)) {
         // The run clip (bank | 0x04) does not exist in this motion set either - with the knife out the game switches to
         // a set that only holds the knife stances, so running with the knife dropped the layer every frame (the stutter).
-        {
-            static double lastLog2 = 0;
-            const double now = Now();
-            if (now - lastLog2 > 1.0) {
-                lastLog2 = now;
-                Log("layerfail: aid=%02X stance=%04X bank=%02X want=%04X good=%02X",
-                    At<uint32_t>(ch, ch::ActionId), stance, (uint32_t)bank, (uint32_t)want, (uint32_t)L->goodBank);
-            }
-        }
         // The motion set derived from the stance does not necessarily hold this character's locomotion clips (the game
         // switches the whole set while the knife is out).  The set the game itself uses when the character walks is the
         // reliable one, so it is tried first, then the last good set, then the walk bank.
