@@ -1,5 +1,8 @@
 # RE3Controls for Resident Evil 5
 
+[English](README.md) | [简体中文](README.zh.md)
+
+
 This is a modification of the mod created by palecvzhope and is based on version 1.9.
 The original mod can be found here: https://www.nexusmods.com/residentevil5goldedition/mods/1141
 
@@ -131,15 +134,18 @@ changes the game's files; it is a single `xinput1_3.dll` next to `re5dx9.exe`.
 
 ### Known engine limits (not mod bugs)
 
-- **Quick slash and item use cannot move.** `knife_attack` (0x27) and `item_use_my_*` (0x61/0x62) raise a movement lock
-  inside the engine (`0xB7A8F0`: `or [ch+0x2D7C], 0x80000000` plus a cleared move vector).  Clearing that bit restores
-  only the animation's own forward step; emulating the aim state changes the direction handling and the throw, so it is
-  not done.  Holding the aim button still allows the slash to move, exactly as in the original game.
-- The **sniper scope** keeps the game's own aim: its view is drawn by the weapon camera and the fields the mod can
-  write do not reach it.
-- The **laser sight** is drawn by the engine only on the pad path; a keyboard player gets the crosshair.
-- Five hooks cannot be installed where RE5Fix has already patched the entries (camera ctrl, bind slot, camera aim ray,
-  pad aim, reticle request).  The mod works without them.
+These come from the engine itself.  The mod does **not** try to work around them, because every attempt to do so
+produced a worse regression (a locked direction, a broken throw, or a frozen scope).
+
+| Limit | Why, and what it looks like | What the player can do |
+|---|---|---|
+| **No movement during the quick slash or during item use** (first-aid spray and the like) | When such an action starts the engine runs `0xB7A8F0`: `or [character+0x2D7C], 0x80000000` and clears the move vector.  That is a movement lock.  Clearing the bit restores only the animation's own forward step, and emulating the aim state changes how the direction is interpreted and breaks the throw | Play it as in the original game: with the aim button held the slash moves normally |
+| **The sniper scope keeps the game's own aim** | The scope view is drawn by the weapon camera; the fields the mod can write (shot point, aim point, pad input) never reach it, and writing the aim state every frame freezes its pitch | Aim inside the scope the way the original game does.  Scoped **walking** still works (`ScopeWalk=1`) |
+| **The laser sight is drawn only on the pad path** | The engine draws it there only | Keyboard players get the crosshair (`Crosshair=1`) |
+| **Five hooks cannot be installed** | RE5Fix has already patched those entries (camera control, bind slot, camera aim ray, pad aim, reticle request).  The mod works without them: the leg-layer mask is applied at `setMotion` instead of in the bind callback | Nothing - no feature depends on them |
+
+> These are design-level limits of the game, not defects of the mod.  The mod's choice is to keep the original
+> behaviour playable rather than to force a rewrite that breaks something else.
 
 ---
 
