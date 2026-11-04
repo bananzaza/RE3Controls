@@ -107,7 +107,6 @@ changes the game's files; it is a single `xinput1_3.dll` next to `re5dx9.exe`.
 | Key | What it does | Notes |
 |---|---|---|
 | **B** | shoulder swap (`[Controls] ShoulderKey`, any letter) | works at any time: walking, aiming, in cover |
-| **T** | crosshair / laser switch (`CrosshairKey`) | at any time |
 
 Keys the game already has keep their meaning; two of them are used a little more widely than before:
 

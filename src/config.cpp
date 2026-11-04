@@ -122,8 +122,6 @@ static const char kDefaultIni[] =
 "          ShoulderSwapAlways=1\r\n"
 "          ; keyboard key that swaps the shoulder (letters A-Z)\r\n"
 "          ShoulderKey=B\r\n"
-"          ; keyboard key that switches the aiming sight: the crosshair or the game's laser sight\r\n"
-"          CrosshairKey=T\r\n"
 "          ; bit 0 = Chris (character on the left), bit 1 = Sheva (character on the right by default)\r\n"
 "          ShoulderLeftKinds=0\r\n"
 "          ; sides the GAME itself uses (bit per kind): default bit 0 = Chris aims with the character left, Sheva right\r\n"
@@ -360,7 +358,6 @@ void LoadConfig() {
     c.shoulderAuto = GetBool(path, "Camera", "ShoulderAuto", c.shoulderAuto);
     c.shoulderSwapAlways = GetBool(path, "Camera", "ShoulderSwapAlways", c.shoulderSwapAlways);
     GetPrivateProfileStringA("Controls", "ShoulderKey", "B", c.shoulderKey, sizeof(c.shoulderKey), path);
-    GetPrivateProfileStringA("Controls", "CrosshairKey", "T", c.crosshairKey, sizeof(c.crosshairKey), path);
     {
         char km[64];
         GetPrivateProfileStringA("Camera", "ShoulderLeftKinds", "0", km, sizeof(km), path);
