@@ -536,8 +536,11 @@ static void ApplyControls(uint32_t padObj, uint32_t character) {
     const uint32_t aidGate = At<uint32_t>(character, ch::ActionId);
     // A climb (and a few other scripted states) report the invalid-action sentinel 0x80000000, which the ranges below do
     // not cover - that is why aiming on a ladder still turned the character.
-    const bool busyAction = ((aidGate >= 0x28 && aidGate <= 0x4D) || (aidGate >= 0x90 && aidGate <= 0x99) ||
-                             (aidGate & 0x80000000u) != 0);
+    // Every character (and every costume) has its own ids for melee, executions, grabs and reactions - Excella's melee
+    // is 0xAC, for instance - so an explicit list of "busy" ranges can never be complete.  The controllable states are
+    // the exceptions and they are few: locomotion (0x00-0x09) and the weapon states (0x1B-0x27).  Everything else is a
+    // locked state, which is what disables the aim and the knife key.
+    const bool busyAction = aidc::Locked(aidGate);   // one classifier for every subsystem (see re5.h)
     const bool aiming = ((phys & P_LT) != 0) && !busyAction;
     const bool knifeKey = ((phys & P_LB) != 0) && !busyAction;   // the knife is ignored during interactions too   // the aim would turn the character mid-action
     const bool knife = knifeKey;
@@ -1106,8 +1109,10 @@ static void ApplyControls(uint32_t padObj, uint32_t character) {
     // when a moving reload or switch hands over to the run.
     // Only where the character can run (standing, walking, running, turning, lowering the gun or knife): in cover A
     // is the reload, in Wesker's dash a turn.
+    const bool knifeStanceRun = (At<uint32_t>(character, ch::ActionId) >= aid::KnifeBegin &&
+                                 At<uint32_t>(character, ch::ActionId) <= aid::KnifeEnd);
     const bool runStance = handover || InLocomotion(character) || action == plact::Turn180 ||
-                           action == plact::ReadyEnd || idNow == aid::KnifeEnd;
+                           action == plact::ReadyEnd || idNow == aid::KnifeEnd || knifeStanceRun;
     const bool canRun = !aimHeld && !dash && S.quickTurnT < 0 && runStance &&
                         (handover || InLocomotion(character) || (S.reload == ReloadPhase::Idle && !reloadMove));
     if (runMode != RunMode::Stock) {
@@ -1329,7 +1334,7 @@ static void ApplyControls(uint32_t padObj, uint32_t character) {
         // does not.  So the release is deferred: while the thrown-item action plays the aim is kept, and it is let go on
         // the first frame after the action is over.
         static bool releasePending[8] = {};
-        if (vtT == VaOf(0x0104456C) || vtT == VaOf(0x01044F38)) { releasePending[tq] = true; out |= P_RT; }
+        if (vtT == VaOf(0x0104456C) || vtT == VaOf(0x01044F38)) { releasePending[tq] = true; }
         else if (releasePending[tq]) { releasePending[tq] = false; out &= ~P_RT; }
     }
     {
@@ -1368,7 +1373,6 @@ static void ApplyControls(uint32_t padObj, uint32_t character) {
     // Releasing here is what produced the twitch, and letting the legs run is what produced the forward drift.
     if (thrownItem) {
         out &= ~(P_LS_DIRS | P_UP | P_DOWN | P_LEFT | P_RIGHT);
-        out |= P_RT;
     }
     // Eight more frames after the thrown-item action is gone: the recovery pose is still playing, and taking input there
     // is what made the body twitch.  Nothing is fed through in that short window.
@@ -1382,7 +1386,18 @@ static void ApplyControls(uint32_t padObj, uint32_t character) {
         else if (tail[tq2] > 0) {
             --tail[tq2];
             out &= ~(P_LS_DIRS | P_UP | P_DOWN | P_LEFT | P_RIGHT);
-            out |= P_RT;
+        }
+    }
+    // DAMAGE PROBE (read-only): what the engine state looks like while a damage reaction plays and just after it.
+    {
+        const uint32_t aidD = At<uint32_t>(character, ch::ActionId);
+        static uint32_t lastD = 0xFFFFFFFF;
+        if (aidD != lastD) {
+            lastD = aidD;
+            const uint32_t lockBits = At<uint32_t>(character, 0x2D7C);
+            const uint32_t gunUp = At<uint32_t>(character, 0x2760);
+            Log("dmg: aid=%02X lock=%08X gun=%d out=%08X phys=%08X",
+                aidD, lockBits, (int)(gunUp & 1), out, phys);
         }
     }
     // Interactions, melee, vaults and climbs: the aim key must do nothing at all.

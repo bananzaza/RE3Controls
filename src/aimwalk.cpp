@@ -50,6 +50,9 @@ struct LegLayer {
     uint32_t ch = 0;
     bool active = false;
     uint16_t clip = 0xFFFF;
+    uint32_t goodBank = 0;   // last motion set in which the strafe/back clips existed
+    uint32_t bankFixStance = 0xFFFFFFFF;  // stance -> motion set substitution that was found to work
+    uint32_t bankFix = 0;
     uint16_t savedMotion = 0xFFFF;
     float savedFrame = 0;
     float rate = 1.0f;
@@ -1027,6 +1030,9 @@ bool AimWalkUpdate(uint32_t ch, float stickX, float stickY, bool walkAllowed, fl
     // rebinds to the new one at the swap.
     const uint16_t stance = At<uint16_t>(SlotObj(ch, 0), 4);
     uint32_t bank = stance == 0xFFFF || Switching(ch) ? 0x05 : (stance >> 8);
+    // A stance whose motion set has no locomotion clips (the game switches to a knife-only set for some characters) is
+    // substituted once, not retried every frame: retrying is what made the run restart (the stutter).
+    if (L->bankFixStance == stance && L->bankFix) bank = L->bankFix;
     // Characters of kind 4 and up: during a reload the walk bank stays the one used before the reload.
     if (CharacterKind(ch) >= 4) {
         if (Reloading(ch)) {
@@ -1036,6 +1042,13 @@ bool AimWalkUpdate(uint32_t ch, float stickX, float stickY, bool walkAllowed, fl
         } else if (stance != 0xFFFF && !Switching(ch)) {
             L->walkBank = (uint8_t)bank;
         }
+    }
+    // With the knife out the game swaps the motion set to the knife's own bank, which has no strafe/back clips for some
+    // characters (Barry in Mercenaries Reunion), so the blend failed and the run restarted every frame.  The walk bank
+    // that was in use before the knife is kept instead.
+    {
+        const uint32_t aidN = At<uint32_t>(ch, ch::ActionId);
+        if (aidN >= 0x22 && aidN <= 0x24 && L->walkBank) bank = L->walkBank;
     }
     const bool runGait = run && L->axis == 0 && fabsf(delta) < (L->runGait ? 0.5f : 0.3f);
     L->runGait = runGait;
@@ -1069,11 +1082,62 @@ bool AimWalkUpdate(uint32_t ch, float stickX, float stickY, bool walkAllowed, fl
         const uint16_t fb = (uint16_t)((bank << 8) | (L->back ? 0x07 : 0x01));
         const uint16_t lr = (uint16_t)((bank << 8) | (L->right ? 0x0D : 0x0C));
         if (!PlayBlend(*L, fb, lr, w, rate)) {
-            L->noBlendBank = bank;  // this weapon set has no strafe/back walk: one clip from the next frame on
-            return false;
+            // PROBE: which weapon set / clip set refused the blend (the Barry knife stutter and the Excella melee one).
+            {
+                static double lastLog = 0;
+                const double now = Now();
+                if (now - lastLog > 1.0) {
+                    lastLog = now;
+                    Log("blendfail: aid=%02X stance=%04X bank=%02X fb=%04X lr=%04X noBlend=%02X good=%02X",
+                        At<uint32_t>(ch, ch::ActionId), stance, (uint32_t)bank, (uint32_t)fb, (uint32_t)lr,
+                        (uint32_t)L->noBlendBank, (uint32_t)L->goodBank);
+                }
+            }
+            // This character/stage has no strafe or back clips in this motion set (Barry's knife set is one example).
+            // Retry with the last set that did have them, instead of dropping the layer for this frame - dropping it is
+            // what restarted the run every frame and produced the stutter.
+            const uint32_t fallback = L->goodBank ? L->goodBank : (uint32_t)L->walkBank;
+            const bool ok = fallback && fallback != bank &&
+                            PlayBlend(*L, (uint16_t)((fallback << 8) | (fb & 0xFF)),
+                                      (uint16_t)((fallback << 8) | (lr & 0xFF)), w, rate);
+            if (ok) { L->bankFixStance = stance; L->bankFix = fallback; }
+            L->noBlendBank = bank;  // do not try this set again for this stance
+            if (!ok) return false;
+        } else {
+            L->goodBank = bank;
         }
     } else if (!PlayLayer(*L, want, rate)) {
-        return false;
+        // The run clip (bank | 0x04) does not exist in this motion set either - with the knife out the game switches to
+        // a set that only holds the knife stances, so running with the knife dropped the layer every frame (the stutter).
+        {
+            static double lastLog2 = 0;
+            const double now = Now();
+            if (now - lastLog2 > 1.0) {
+                lastLog2 = now;
+                Log("layerfail: aid=%02X stance=%04X bank=%02X want=%04X good=%02X",
+                    At<uint32_t>(ch, ch::ActionId), stance, (uint32_t)bank, (uint32_t)want, (uint32_t)L->goodBank);
+            }
+        }
+        // The motion set derived from the stance does not necessarily hold this character's locomotion clips (the game
+        // switches the whole set while the knife is out).  The set the game itself uses when the character walks is the
+        // reliable one, so it is tried first, then the last good set, then the walk bank.
+        const WalkSample* wsFb = WalkFor(ch, false);
+        const uint32_t cand[3] = { (uint32_t)(wsFb ? wsFb->bank : 0), L->goodBank, (uint32_t)L->walkBank };
+        bool placed = false;
+        for (int ci = 0; ci < 3 && !placed; ++ci) {
+            const uint32_t b2 = cand[ci];
+            if (!b2 || b2 == bank || b2 == cand[(ci + 1) % 3]) continue;
+            if (PlayLayer(*L, (uint16_t)((b2 << 8) | (want & 0xFF)), rate)) {
+                L->goodBank = b2;
+                L->noBlendBank = bank;
+                L->bankFixStance = stance;
+                L->bankFix = b2;
+                placed = true;
+            }
+        }
+        if (!placed) return false;
+    } else {
+        L->goodBank = bank;
     }
 
     // One clip (the run): the legs turn toward the real direction with a critically damped spring (exact step, so

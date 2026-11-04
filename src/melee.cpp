@@ -50,7 +50,7 @@ void __fastcall HookUpdateActionCamera(uint32_t pawn, void* edx) {
 // Player action ids (ch+0x10E0, table 0x113AF80): 0x30-0x4D attack_* (hook, upper, straight, kick, reverse knuckle,
 // finishers, stomp, neck breaker, context knife attacks, combos, lariat, knee bazooka), 0x6F co-op help attack,
 // 0xAC/0xAD attacks on em10. Not the taunt (0x2F), the knife stance (0x22-0x27), dodges, grabs or damage.
-bool IsMeleeAction(uint32_t id) { return (id >= 0x30 && id <= 0x4D) || id == 0x6F || id == 0xAC || id == 0xAD; }
+bool IsMeleeAction(uint32_t id) { return aidc::Melee(id); }
 
 namespace {
 

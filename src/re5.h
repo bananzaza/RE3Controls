@@ -138,4 +138,22 @@ constexpr uint32_t KnifeBegin = 0x22, KnifeLoop = 0x23, KnifeEnd = 0x24, KnifeFr
 template <class T>
 inline T& At(uint32_t base, uint32_t off) { return *reinterpret_cast<T*>(base + off); }
 
+// ------------------------------------------------------------------------------------------------ action classes
+// One place decides what a player action id means.  Every subsystem used to carry its own list and each of those lists
+// was incomplete for some character (Excella's melee is 0xAC, which none of the old ranges covered).
+namespace aidc {
+inline bool Controllable(uint32_t id) { return id <= 0x09 || (id >= 0x1B && id <= 0x27); }
+inline bool Locked(uint32_t id) { return !Controllable(id); }
+
+// Melee / context attack: everything from 0x30 up, except the groups that are known to be something else
+// (items, the plaga reaction, damage reactions).
+inline bool Melee(uint32_t id) {
+    if (id < 0x30 || id > 0xC8) return false;
+    if (id >= 0x59 && id <= 0x68) return false;   // item get/put/use
+    if (id == 0x85 || id == 0x86) return false;   // plaga stick in/out
+    if (id >= 0x88 && id <= 0x9F) return false;   // damage / reactions
+    return true;
+}
+}  // namespace aidc
+
 }  // namespace re5
