@@ -181,6 +181,8 @@ static const char kDefaultIni[] =
     "\r\n"
     "\r\n"
     "[Movement]\r\n"
+    "; EXPERIMENTAL, off: the mod replaces the native walk/run/back updates so it owns the step\r\n"
+    "EngineMove=0\r\n"
     "\r\n"
     "; Walking / running speed outside of aiming\r\n"
     "          MoveWalkSpeed=1.0\r\n"
@@ -430,6 +432,7 @@ void LoadConfig() {
         float v = 1.0f;
         c.shotgunSpread = ParseNumber(buf, &v) && v >= 0.0f && v <= 1.0f ? v : 1.0f;  // anything else: the original
     }
+    c.engineMove = GetBool(path, "Movement", "EngineMove", c.engineMove);
     c.moveWalk = GetScale(path, "Movement", "MoveWalkSpeed", 0.5f, 2.0f);
     c.moveRun = GetScale(path, "Movement", "MoveRunSpeed", 0.5f, 2.0f);
     c.noColorFilter = GetBool(path, "Visual", "NoColorFilter", c.noColorFilter);

@@ -16,6 +16,7 @@
 #include "balance.h"
 #include "inventory.h"
 #include "kbinput.h"
+#include "movehook.h"
 #include <d3d9.h>
 #include <math.h>
 #include "MinHook.h"
@@ -1412,6 +1413,36 @@ static void ApplyControls(uint32_t padObj, uint32_t character) {
             out &= ~(P_LS_DIRS | P_UP | P_DOWN | P_LEFT | P_RIGHT);
         }
     }
+    // Engine movement takeover (experimental, [Movement] EngineMove=1).  The native locomotion is suppressed while a
+    // slash, an item use or a throw plays, so the actor is moved here instead, in the camera's direction.
+    if (EngineMovementActive() && freeCam && fc.initialised && stickMag >= 0.3f) {
+        const uint32_t aidE = At<uint32_t>(character, ch::ActionId);
+        // Every action where the engine suppresses locomotion: the slash, the whole fire action (which also carries the
+        // throw) and the item group.  The item ids differ per build (0x59-0x60, 0x5F-0x63 have all been observed for the
+        // spray), so the whole group is covered instead of one id.
+        const bool lockedMove = (aidE == aid::KnifeAttack) || (aidE == 0x1E) || (aidE >= 0x59 && aidE <= 0x68);
+        if (lockedMove) {
+            const float yawE = StickWorldYaw(fc, st.lx, st.ly);
+            static int loggedE = 0;
+            // Walk pace by default; the run input (or a run-mode toggle) doubles it, so the sword/spray/throw move
+            // like the rest of the movement instead of creeping.
+            const float speedE = (runIntent || (phys & runBit)) ? 430.0f : 220.0f;
+            const bool moved = EngineMoveStep(character, yawE, speedE, (float)dt);
+            if (moved) {
+                if (loggedE < 6) {
+                    ++loggedE;
+                    const uint32_t po = character + ch::Pos;
+                    Log("enginemove: aid=%02X yaw=%.1f dt=%.3f pos=%.1f,%.1f", aidE, yawE * 57.3f, (float)dt,
+                        At<float>(po, 0), At<float>(po, 8));
+                }
+                static int everyE = 0;
+                if ((++everyE % 25) == 1) {
+                    const uint32_t po = character + ch::Pos;
+                    Log("enginemove: aid=%02X pos=%.1f,%.1f", aidE, At<float>(po, 0), At<float>(po, 8));
+                }
+            }
+        }
+    }
     // Interactions, melee, vaults and climbs: the aim key must do nothing at all.
     on = out;
     At<uint32_t>(padObj, pp::Trg) = trg;
@@ -1662,6 +1693,7 @@ void InitGameHooks() {
     InitMeleeHooks();
     InitBalanceHooks();
     InitKeyboardHooks();
+  InitMovementHooks();
     static const BYTE sigPad[] = {0x83, 0xEC, 0x28, 0x0F, 0x57, 0xC0, 0x53, 0x56, 0x8B, 0xF1};
     bool ok = HookAt(kFnPlayerPadUpdate, sigPad, sizeof(sigPad), (void*)HookPlayerPadUpdate,
                      (void**)&oPlayerPadUpdate, "PlayerPad::Update");

@@ -32,6 +32,7 @@ struct Config {
     bool meleeCamera = true;        // melee attacks keep the normal camera (no attack cinematic), right stick turns it
     bool grabCamera = true;         // enemy grabs keep the normal camera (no grab cinematic), right stick turns it
     bool meleeOnly = false;         // Mode=MeleeCamera: only the melee camera, everything else as in the original game
+    bool engineMove = false;     // EXPERIMENTAL: the mod takes over the native locomotion entries
     bool gunWalk = true;            // walk while aiming a gun
     bool scopeWalk = true;          // walk in the sniper / rocket launcher scope (zoom on RB + left stick)
     bool shoulderAuto = true;       // pick the shoulder from the character (Chris left, Sheva right by default)
