@@ -2,6 +2,9 @@
 #include <stdint.h>
 
 // The mouse crosshair instead of the laser sight (gamepad, and keyboard/mouse with MouseAim=RE3).
+// Runtime switch between the two aiming sights: -1 = follow the ini, 0 = the game's laser sight, 1 = the crosshair.
+void SetCrosshairMode(int mode);
+int CrosshairMode();
 void InitCrosshairHooks();
 // game.cpp: the local player holds the gun up (LT), as opposed to the knife.
 bool GunAimHeld(uint32_t character);

@@ -1,7 +1,7 @@
 // Version information shown in the file's Properties > Details.
 1 VERSIONINFO
-FILEVERSION 1,9,0,0
-PRODUCTVERSION 1,9,0,0
+FILEVERSION 1,9,5,0
+PRODUCTVERSION 1,9,5,0
 FILEFLAGSMASK 0x3F
 FILEFLAGS 0x0
 FILEOS 0x40004
@@ -14,11 +14,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "RE3Controls mod (not affiliated with Capcom or Microsoft)"
             VALUE "FileDescription", "RE3Controls - RE3-style gamepad and keyboard/mouse controls mod for Resident Evil 5 (XInput proxy)"
-            VALUE "FileVersion", "1.9.0.0"
+            VALUE "FileVersion", "1.9.5mod"
             VALUE "InternalName", "RE3Controls"
             VALUE "OriginalFilename", "xinput1_3.dll"
             VALUE "ProductName", "RE3Controls"
-            VALUE "ProductVersion", "1.9"
+            VALUE "ProductVersion", "1.9.5mod"
             VALUE "Comments", "Mod for Resident Evil 5 Gold Edition 1.2.0 (Steam). Forwards XInput to the system XInput1_4/9_1_0."
         END
     END

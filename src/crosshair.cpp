@@ -16,6 +16,7 @@
 #include "re5.h"
 #include "config.h"
 #include "crosshair.h"
+#include "camera.h"
 #include "kbinput.h"
 #include "damage.h"
 #include "net.h"
@@ -45,6 +46,9 @@ constexpr uint32_t ChCursor = 0x2910;    // float2, mouse cursor; the type-3 ret
 // uLaserSight colours: own beam, dot, dot glow (vector4 each)
 constexpr uint32_t kLaserColors[3] = {0x270, 0x2A0, 0x2C0};
 const float kLaserDefaults[3][4] = {{2.0f, 0, 0, 1.0f}, {1.0f, 0, 0, 0.2f}, {1.0f, 0, 0, 0.186f}};
+// Four more colour entries of the laser object (16 bytes each), hidden with the three above.
+constexpr uint32_t kLaserExtra[4] = {0x250, 0x260, 0x280, 0x2B0};
+const float kLaserExtraDefaults[4][4] = {{1.3f, 0, 0, 1.0f}, {1.3f, 0, 0, 1.0f}, {1.3f, 0, 0, 1.0f}, {1.2f, 0, 0, 0}};
 
 constexpr uint32_t kFnLaserRaycast = 0x00B68E10;  // thiscall(ch) -> 0 none, 1 enemy shape, 2 prop, 3 static
 constexpr uint32_t kFnCameraAimRay = 0x00B69280;  // thiscall(ch) -> same codes for the camera ray; sets 0x2700
@@ -64,22 +68,34 @@ struct AimInfo {
     int hit = 0;          // what the camera aim ray hit (0 none, 1 enemy, 2 prop, 3 static)
     uint32_t weapon = 0;  // inventory entry of the gun in hand, and its rounds last frame
     int rounds = -1;
+    uint32_t used = 0;    // GetTickCount() of the last lookup
 };
-AimInfo g_aim[4];
+AimInfo g_aim[8];
 
+// Entries of characters that are gone are never released, so the table fills up over restarts. Take a free entry or
+// else the one unused for longest; reusing one fixed entry made two local players take it from each other.
 AimInfo& AimFor(uint32_t ch) {
+    const uint32_t now = GetTickCount();
     for (auto& a : g_aim)
-        if (a.ch == ch) return a;
+        if (a.ch == ch) { a.used = now; return a; }
+    AimInfo* slot = nullptr;
     for (auto& a : g_aim)
-        if (!a.ch) { a.ch = ch; return a; }
-    g_aim[0] = AimInfo{};
-    g_aim[0].ch = ch;
-    return g_aim[0];
+        if (!a.ch) { slot = &a; break; }
+    if (!slot) {
+        slot = &g_aim[0];
+        for (auto& a : g_aim)
+            if ((uint32_t)(now - a.used) > (uint32_t)(now - slot->used)) slot = &a;
+    }
+    *slot = AimInfo{};
+    slot->ch = ch;
+    slot->used = now;
+    return *slot;
 }
 
 struct HiddenLaser {
     uint32_t laser = 0;
     float saved[3][4];
+    float savedX[4][4];
 };
 HiddenLaser g_hidden[4];
 
@@ -106,7 +122,10 @@ bool KbCrosshair(uint32_t ch) {
 
 void Restore(HiddenLaser& h) {
     if (IsLaser(h.laser))
+    {
         for (int i = 0; i < 3; ++i) memcpy((void*)(h.laser + kLaserColors[i]), h.saved[i], 16);
+        for (int i = 0; i < 4; ++i) memcpy((void*)(h.laser + kLaserExtra[i]), h.savedX[i], 16);
+    }
     h.laser = 0;
 }
 
@@ -125,8 +144,14 @@ void HideLaser(uint32_t laser) {
             const float* s = h->saved[i];
             if (s[0] == 0 && s[1] == 0 && s[2] == 0) memcpy(h->saved[i], kLaserDefaults[i], 16);
         }
+        for (int i = 0; i < 4; ++i) {
+            memcpy(h->savedX[i], (void*)(laser + kLaserExtra[i]), 16);
+            const float* s = h->savedX[i];
+            if (s[0] == 0 && s[1] == 0 && s[2] == 0) memcpy(h->savedX[i], kLaserExtraDefaults[i], 16);
+        }
     }
     for (int i = 0; i < 3; ++i) memset((void*)(laser + kLaserColors[i]), 0, 16);
+    for (int i = 0; i < 4; ++i) memset((void*)(laser + kLaserExtra[i]), 0, 16);
 }
 
 void ShowLaser(uint32_t laser) {
@@ -237,6 +262,22 @@ bool CrosshairOn(uint32_t ch) {
            GunUp(ch) && !At<uint8_t>(ch, ChScope) && Rd(ch + ChAimRayObj) != 0 && PlainGun(ch);
 }
 
+// The barrel line: start ch+0x2710, end ch+0x2720, copied into the laser object at +0x210/+0x220. For the grenade
+// launcher (0x10C) and the Gatling gun (0x115) the crosshair is drawn where the line ends (HookReticle).
+constexpr uint32_t kItemGrenadeLauncher = 0x10C;
+constexpr uint32_t kItemGatlingGun = 0x115;
+constexpr uint32_t ChLaserStart = 0x2710;
+constexpr uint32_t ChLaserEnd = 0x2720;
+float g_barrel[3] = {};     // end of the barrel line at the last laser raycast, for the launcher or the Gatling gun
+uint32_t g_barrelCh = 0;
+bool BarrelWeaponInHand(uint32_t ch) {
+    uint32_t entry = 0;
+    int rounds = 0;
+    if (!GunInHand(ch, &entry, &rounds)) return false;
+    const uint32_t item = Rd(entry + 4);
+    return item == kItemGrenadeLauncher || item == kItemGatlingGun;
+}
+
 // The camera aim ray: what it hits colours the crosshair.
 int __fastcall HookCameraAimRay(uint32_t ch, void* edx) {
     const int r = oCameraAimRay(ch, edx);
@@ -263,11 +304,44 @@ int __fastcall HookLaserRaycast(uint32_t ch, void* edx) {
             for (int i = 0; i < 3; ++i) shot[i] = m[i] + d[i] / len * 5000.0f;
         return r;
     }
-    if (!CrosshairOn(ch)) return oLaserRaycast(ch, edx);
+    // Aim follows the camera.  For a pad (and for the keyboard's own aim) the game fires along the BARREL, and with
+    // the free camera the barrel no longer points where the player looks: that is the "it aims in front of the
+    // character" behaviour.  While aiming a plain gun, the shot point is put on the camera ray instead - the same ray
+    // the mod's centred crosshair uses - so the shot goes where the camera looks.
+    // NOTE: this must NOT return early - returning here skipped the code below that shortens the laser beam, which is
+    // why a pad player aiming at an enemy saw the laser AND the crosshair at the same time.
+    bool camRay = false;
+    float camPoint[3] = {};
+    if (Rd(ch + ch::NetControl) == 0 && At<uint8_t>(ch, ChScope) == 0 && GunUp(ch) && PlainGun(ch)) {
+        float rayEye[3], rayDir[3];
+        if (AimCameraRay(rayEye, rayDir)) {
+            camRay = true;
+            for (int i = 0; i < 3; ++i) camPoint[i] = rayEye[i] + rayDir[i] * 5000.0f;
+        }
+    }
+    const bool showCross = CrosshairOn(ch);
+    if (!camRay && !showCross) return oLaserRaycast(ch, edx);
     float shot[3];
     memcpy(shot, (void*)(ch + ChShot), 12);
     oLaserRaycast(ch, edx);
-    memcpy((void*)(ch + ChShot), shot, 12);
+    memcpy((void*)(ch + ChShot), camRay ? camPoint : shot, 12);
+    if (!showCross) return 0;  // the laser sight keeps its beam
+    const float* start = (const float*)(ch + ChLaserStart);
+    float* end = (float*)(ch + ChLaserEnd);
+    if (BarrelWeaponInHand(ch)) {
+        // End of the barrel line, used by HookReticle for the crosshair of these two weapons.
+        memcpy(g_barrel, end, 12);
+        g_barrelCh = ch;
+    }
+    // The beam is drawn from that line. It is kept in its direction and made half a millimetre long, because with the
+    // colours hidden a long white beam still showed in dark places.
+    const float d[3] = {end[0] - start[0], end[1] - start[1], end[2] - start[2]};
+    const float len = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    if (len > 1.0f) {
+        for (int i = 0; i < 3; ++i) end[i] = start[i] + d[i] / len * 0.05f;
+        const uint32_t laser = Rd(ch + ChLaser);
+        if (IsLaser(laser)) memcpy((void*)(laser + 0x220), end, 12);
+    }
     return 0;
 }
 
@@ -275,6 +349,8 @@ void __fastcall HookReticle(uint32_t cockpit, void* edx) {
     g_reticleScale = 1.5f;  // the game's crosshair (another player's, the mouse cursor style) keeps its size
     g_reticleSpread = 15.0f;
     const uint32_t ch = Rd(cockpit + CkCharacter);
+    uint32_t aimCh = 0;  // the character whose crosshair point is moved for this draw (grenade launcher)
+    float aimSaved[3] = {};
     if (ch && Readable((void*)ch, 0x3000) && Rd(ch + ch::NetControl) == 0 && Rd(ch + ChCockpit) == cockpit) {
         const Config& c = Cfg();
         const uint32_t laser = Rd(ch + ChLaser);
@@ -283,6 +359,12 @@ void __fastcall HookReticle(uint32_t cockpit, void* edx) {
             HideLaser(laser);
             if (CrosshairOn(ch)) {
                 At<uint8_t>(cockpit, CkColour) = AimFor(ch).hit == 1 ? 2 : 1;
+                if (g_barrelCh == ch && BarrelWeaponInHand(ch)) {
+                    // Launcher or Gatling gun: the crosshair is drawn at the end of the barrel line, for this draw only.
+                    memcpy(aimSaved, (void*)(ch + ChAimPoint), 12);
+                    memcpy((void*)(ch + ChAimPoint), g_barrel, 12);
+                    aimCh = ch;
+                }
                 // The game's own spread on a shot (0xB5B160, the same for both devices) is none for handguns.
                 KickOnShot(ch, cockpit);
                 // CrosshairKick=0: no opening at all, also not the game's own for shotguns and magnums (its fire
@@ -315,6 +397,7 @@ void __fastcall HookReticle(uint32_t cockpit, void* edx) {
         }
     }
     oReticle(cockpit, edx);
+    if (aimCh) memcpy((void*)(aimCh + ChAimPoint), aimSaved, 12);
 }
 
 // The character's reticle request (thiscall(character), plain ret; called by the gun actions and the knife actions):
@@ -357,7 +440,6 @@ PFN_PadAim oPadAim = nullptr;
 constexpr uint32_t kParamPtr = 0x011B27B4;    // sParameter
 constexpr uint32_t kOptionsPtr = 0x012340A4;  // +0x1042C: per-player options (stride 0xF4)
 constexpr uint32_t kFnControlType = 0x00C42960;  // thiscall(options, player) -> 0..3 = control type A..D
-constexpr uint32_t ChStateBits = 0x2D8C;      // 0x400: wall cover (the game lets the arms reach further there)
 
 // Types B and D aim with the right stick (the 4 floats are left angle/magnitude, right angle/magnitude).
 bool AimWithRightStick(uint32_t ch) {
@@ -376,7 +458,9 @@ void __fastcall HookPadAim(uint32_t padEx, void* edx, uint32_t ch, float a, floa
     // (+0x4B4, up to 7 degrees) and catches up in steps, which shows as trembling; the same direct turn as on the pad.
     const bool kbAim = cfg.enabled && padEx && Readable((void*)padEx, 0x4E8) && ch && Readable((void*)ch, 0x3000) &&
                        Rd(ch + ch::NetControl) == 0 && KbCrosshair(ch);
-    const bool direct = (localPad || kbAim) && cfg.directHorizontal && CrosshairOn(ch) && !(Rd(ch + ChStateBits) & 0x400);
+    // Also in wall cover: the arm zone (+0x4B4) is wider there, and its sway made the crosshair wait for the stick to
+    // get past it before the aim moved.
+    const bool direct = (localPad || kbAim) && cfg.directHorizontal && CrosshairOn(ch);
     const uint32_t prm = localPad && (cfg.aimSpeedX != 1.0f || cfg.aimSpeedY != 1.0f) ? Rd(kParamPtr) : 0;
     const bool scale = prm && Readable((void*)(prm + 0x2D0), 8);
     float pitchRate = 0.0f, yawRate = 0.0f;
@@ -440,14 +524,14 @@ void InitCrosshairHooks() {
     else
         Log("hook cockpit reticle failed");
     static const BYTE sigCamRay[] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF0, 0x81, 0xEC, 0x94, 0x00, 0x00, 0x00, 0x53, 0x56, 0x8B, 0xF1};
-    if (SafeEqual((void*)kFnCameraAimRay, sigCamRay, sizeof(sigCamRay)) &&
+    if (HookSite((void*)kFnCameraAimRay, sigCamRay, sizeof(sigCamRay)) &&
         MH_CreateHook((void*)kFnCameraAimRay, (void*)HookCameraAimRay, (void**)&oCameraAimRay) == MH_OK &&
         MH_QueueEnableHook((void*)kFnCameraAimRay) == MH_OK)
         Log("hook camera aim ray at %08x", kFnCameraAimRay);
     else
         Log("hook camera aim ray failed");
     static const BYTE sigPadAim[] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF0, 0x83, 0xEC, 0x64, 0x53, 0x56, 0x57};
-    if (SafeEqual((void*)kFnPadAim, sigPadAim, sizeof(sigPadAim)) &&
+    if (HookSite((void*)kFnPadAim, sigPadAim, sizeof(sigPadAim)) &&
         MH_CreateHook((void*)kFnPadAim, (void*)HookPadAim, (void**)&oPadAim) == MH_OK &&
         MH_QueueEnableHook((void*)kFnPadAim) == MH_OK)
         Log("hook pad aim (direct horizontal, aim speed) at %08x", kFnPadAim);
@@ -463,7 +547,7 @@ void InitCrosshairHooks() {
     // push ecx / push esi / mov esi,ecx / cmp byte [esi+2998h],1 / jz ... ; the tail: mov ecx,[esi+2640h] -> 0x9ED350
     static const BYTE sigReq[] = {0x51, 0x56, 0x8B, 0xF1, 0x80, 0xBE, 0x98, 0x29, 0x00, 0x00, 0x01, 0x0F, 0x84};
     static const BYTE sigReqTail[] = {0x8B, 0x8E, 0x40, 0x26, 0x00, 0x00, 0xC6, 0x86, 0x18, 0x29, 0x00, 0x00, 0x01, 0xE8};
-    if (SafeEqual((void*)kFnReticleRequest, sigReq, sizeof(sigReq)) &&
+    if (HookSite((void*)kFnReticleRequest, sigReq, sizeof(sigReq)) &&
         SafeEqual((void*)0x00B69A98, sigReqTail, sizeof(sigReqTail)) &&
         MH_CreateHook((void*)kFnReticleRequest, (void*)HookReticleRequest, (void**)&oReticleRequest) == MH_OK &&
         MH_QueueEnableHook((void*)kFnReticleRequest) == MH_OK)

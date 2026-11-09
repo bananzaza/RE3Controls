@@ -8,7 +8,11 @@ struct FreeCam {
     uint32_t character = 0;  // local player the camera belongs to
     float yaw = 0;           // world yaw the camera looks along (radians, same convention as the character)
     float pitch = 0;         // radians, + = looking down (camera above the shoulder), - = looking up
-    bool leftShoulder = false;  // camera over the left shoulder
+    bool leftShoulder = false;  // camera over the left shoulder (orbit only)
+    bool mirrorAim = false;     // mirror the game's aim/look-at poses: only when the wanted side differs from the game's own
+    bool charLeft = true;       // wanted side expressed as "the character stands on the left of the screen"
+    bool gameCharLeft = true;   // measured once per aim: the game's own aim side puts the character on the left
+    bool aimSideKnown = false;  // the measurement above was taken for this aim session
     bool active = false;     // the orbit camera runs this frame (not aiming, free camera on)
     bool initialised = false;
     bool noAimRig = false;   // reloading on the move: keep the normal camera while the gun is up
@@ -23,6 +27,16 @@ FreeCam& CamFor(uint32_t character);
 bool IsCamCharacter(uint32_t character);
 void InitCameraHooks();
 float DefaultCameraPitch();  // radians, from the ini
+// Extra fov (degrees, negative = closer) from the plain-gun zoom keys, 0 when off.
+float ZoomFovExtra();
+// Camera ray while aiming (eye + unit direction), used by the crosshair code so the shot follows the camera instead of
+// the barrel line.  False when the game does not own the aim camera this frame.
+bool AimCameraRay(float eye[3], float dir[3]);
+// Pitch (radians) of the game's own aim camera the last time it was running; the aim start nudges the game's pitch
+// towards the free camera through its own input using this as the "where the aim was" reference.
+float AimPitchLast();
+// Mouse vertical (raww units), the scale to radians and the invert flag, fed by game.cpp for the aim pitch.
+void SetAimMouse(float dy, float scale, bool invert);
 
 // yaw helpers: forward = (sin yaw, 0, cos yaw), right = (-cos yaw, 0, sin yaw)
 // World facing of a character (on a moving boat or platform: its own yaw plus the platform's heading).

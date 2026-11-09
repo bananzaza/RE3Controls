@@ -108,7 +108,7 @@ void InventoryPadUpdated(uint32_t padObj) {
         if (s.valid) {
             // The grid did not run after the last stash: unexpected, so after a few times the feature stays off.
             s.valid = false;
-            if (++g_stale <= 3) Log("inventory move: the grid did not run after the builder (%d)", g_stale);
+            ++g_stale;
         }
         if (!s.hadView) s.prevView = 0;
         s.hadView = false;

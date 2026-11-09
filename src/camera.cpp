@@ -27,7 +27,11 @@ using namespace re5;
 static FreeCam g_cams[4];  // by player slot
 FreeCam& CamFor(uint32_t character) { return g_cams[At<uint8_t>(character, ch::NetSlot) & 3]; }
 bool IsCamCharacter(uint32_t character) {
-    return character && Readable((void*)character, 0x3000) && CamFor(character).character == character;
+    // Check known camera slots first so we almost never VirtualQuery random addresses.
+    if (!character) return false;
+    for (int i = 0; i < 4; ++i)
+        if (g_cams[i].character == character) return Readable((void*)character, 0x3000);
+    return false;
 }
 
 static inline float Rad(float deg) { return deg * 0.01745329252f; }
@@ -200,7 +204,8 @@ struct ViewSettings {
 static bool ViewSettingsFor(uint32_t q, ViewSettings* out) {
     const Config& c = Cfg();
     *out = ViewSettings{};
-    if (!c.enabled || c.meleeOnly || (c.aimDistance <= 0.0f && c.fieldOfView == 0.0f && c.aimFieldOfView == 0.0f) ||
+    if (!c.enabled || c.meleeOnly ||
+        (c.aimDistance <= 0.0f && c.fieldOfView == 0.0f && c.aimFieldOfView == 0.0f && ZoomFovExtra() == 0.0f) ||
         !Readable((void*)q, 0x680))
         return false;
     const uint32_t ch = At<uint32_t>(q, cam::Parent);
@@ -211,7 +216,7 @@ static bool ViewSettingsFor(uint32_t q, ViewSettings* out) {
     const bool mounted = MountedGunAim(ch, rig);
     out->back = mounted ? 0.0f : c.aimDistance;
     out->fov = c.fieldOfView;
-    out->aimFov = mounted ? 0.0f : c.aimFieldOfView;
+    out->aimFov = mounted ? 0.0f : c.aimFieldOfView + ZoomFovExtra();  // plain-gun zoom (F / C) adds here
     return true;
 }
 
@@ -352,8 +357,13 @@ static int OurCamera(uint32_t q) {
 // uCameraCtrl::update: it picks the lag-camera mode from the aim flag before running the QFPS update, so the mod's
 // reload-on-the-move clears the flag here (the character raised the gun without the player aiming).
 static void __fastcall HookCtrlUpdate(uint32_t ctrl, void* edx, uint32_t dt) {
-    const int idx = OurCamera(ctrl + 0xE00);
-    if (idx >= 0 && g_cams[idx].noAimRig && Cfg().freeCamera) At<uint8_t>(ctrl, 0xE00 + cam::AimRig) = 0;
+    const Config& c = Cfg();
+    // noAimRig only matters with the full free camera; MeleeCamera never sets it.
+    // The scope is left to the game (see game.cpp): no lookV write here.
+    if (c.enabled && c.freeCamera && !c.meleeOnly) {
+        const int idx = OurCamera(ctrl + 0xE00);
+        if (idx >= 0 && g_cams[idx].noAimRig) At<uint8_t>(ctrl, 0xE00 + cam::AimRig) = 0;
+    }
     oCtrlUpdate(ctrl, edx, dt);
 }
 
@@ -393,8 +403,50 @@ static void AimTracking(uint32_t q, int idx) {
     }
 }
 
+// Camera ray while aiming, shared with crosshair.cpp through AimCameraRay().
+static float g_aimEye[3] = {0, 0, 0}, g_aimDir[3] = {0, 0, 1};
+static bool g_aimRayValid = false;
+static float g_aimPitchLast = 0.0f;
+float AimPitchLast() { return g_aimPitchLast; }
+// Mouse vertical for the aim, fed by game.cpp (it owns the mouse deltas): when AimPitchFromMouse is on the mod drives
+// the aim pitch and writes it into cam::LookV every frame.  Writing the RESULT each frame does not accumulate, unlike
+// seeding the state on the press - that was the "every aim walks a little lower" bug.
+static float g_aimMouseDY = 0.0f, g_aimMouseScale = 0.0f;
+static bool g_aimMouseInvert = false;
+void SetAimMouse(float dy, float scale, bool invert) { g_aimMouseDY = dy; g_aimMouseScale = scale; g_aimMouseInvert = invert; }
+bool AimCameraRay(float eye[3], float dir[3]) {
+    if (!g_aimRayValid) return false;
+    for (int i = 0; i < 3; ++i) { eye[i] = g_aimEye[i]; dir[i] = g_aimDir[i]; }
+    return true;
+}
+static bool g_lastAimRig[4] = {};
+static int g_aimSeedFrames[4] = {};
+// One compact line per aim (start, ~0.35 s in, end) with every field the aim could follow, so a single aim with the
+// mouse moved up and down shows which one tracks the camera: camPitch = the view the player sees, shotY = the point the
+// game aims/ shoots at (ch+0x2700), aim8/aimC = the two character angles, lookV = the game's vertical look channel.
+static void AimTrace(uint32_t self, int idx, const char* when) {
+    const uint32_t ch = At<uint32_t>(self, cam::Parent);
+    const float* eye = (const float*)(self + cam::EyeAim);
+    const float* tgt = (const float*)(self + cam::TargetAim);
+    const float dx = tgt[0] - eye[0], dz = tgt[2] - eye[2];
+    const float len = sqrtf(dx * dx + dz * dz);
+    const float camPitch = len > 0.001f ? atan2f(eye[1] - tgt[1], len) * 57.3f : 0.0f;
+    float a8 = 0.0f, aC = 0.0f, shotY = 0.0f, rayY = 0.0f;
+    if (ch && Readable((void*)ch, 0x3000)) {
+        a8 = At<float>(ch, 0x2908) * 57.3f;
+        aC = At<float>(ch, 0x290C) * 57.3f;
+        shotY = At<float>(ch, 0x2704);
+        rayY = At<float>(ch, 0x2894);
+    }
+    Log("aimtrace[%s] camPitch=%+.1f lookV=%+.2f aim8=%+.1f aimC=%+.1f shotY=%+.0f rayY=%+.0f",
+        when, camPitch, At<float>(self, cam::LookV), a8, aC, shotY, rayY);
+}
 static void __fastcall HookQfpsUpdate(uint32_t self, void* edx, uint32_t arg) {
     const Config& c = Cfg();
+    if (!c.enabled) {
+        oQfpsUpdate(self, edx, arg);
+        return;
+    }
     const int idx = OurCamera(self);
     if (!(c.freeCamera || c.meleeOnly) || idx < 0) {
         // Other characters' cameras (the online partner's) update too: only a camera losing its orbit (or the orbit
@@ -414,8 +466,6 @@ static void __fastcall HookQfpsUpdate(uint32_t self, void* edx, uint32_t arg) {
     }
     FreeCam& fc = g_cams[idx];
     OrbitState& o = g_orbits[idx];
-    o.camera = self;
-    if (fc.noAimRig) At<uint8_t>(self, cam::AimRig) = 0;
     // Looking at the partner (locate-partner button, co-op action points): the game turns the camera.
     const bool lookAt = At<uint8_t>(self, cam::LookAt) || At<uint8_t>(self, cam::LookAt + 1);
     // Mode=MeleeCamera: the orbit runs during melee attacks, then turns back toward where the game's camera looks
@@ -441,8 +491,39 @@ static void __fastcall HookQfpsUpdate(uint32_t self, void* edx, uint32_t arg) {
             o.returnStart = tNow;
             if (DevMode()) Log("dev: melee camera returning");
         }
+        // Fast path: MeleeCamera and the orbit is idle. Skip pose mirror, FollowPlatform, Orbit, blends.
+        // Still run the game's camera and keep a light track of its yaw/pitch so the next melee starts clean.
+        if (!active && !o.returning && o.blendStart < 0 && !lookAt) {
+            o.camera = self;
+            oQfpsUpdate(self, edx, arg);
+            float* eye = (float*)(self + cam::EyeAim);
+            float* tgt = (float*)(self + cam::TargetAim);
+            const float dx = tgt[0] - eye[0], dz = tgt[2] - eye[2];
+            if (dx * dx + dz * dz >= 1.0f) {
+                fc.yaw = atan2f(dx, dz);
+                const float len = sqrtf(dx * dx + dz * dz);
+                float pitch = atan2f(eye[1] - tgt[1], len);
+                if (pitch > Rad(55.0f)) pitch = Rad(55.0f);
+                if (pitch < Rad(-40.0f)) pitch = Rad(-40.0f);
+                fc.pitch = pitch;
+                fc.initialised = true;
+                fc.lastCameraUpdate = tNow;
+                memcpy(o.lastEye, eye, 12);
+                memcpy(o.lastTgt, tgt, 12);
+                o.haveLast = true;
+                o.lastOwn = false;
+            }
+            return;
+        }
     }
-    const bool own = (active || (c.meleeOnly && o.returning)) && !lookAt && At<uint8_t>(self, cam::AimRig) == 0;
+    o.camera = self;
+    if (fc.noAimRig) At<uint8_t>(self, cam::AimRig) = 0;
+    // AimCamera: keep the mod's own camera during the aim.  The game's aim camera is a separate camera with its own
+    // pitch, so handing the view over on every aim press made the view jump to a direction the player had not chosen
+    // (and writing our pitch into it to compensate drifted a little on every press).  Keeping the orbit camera means the
+    // view simply does not move when aiming: the crosshair stays where the player was looking.
+    const bool own = (active || (c.meleeOnly && o.returning)) && !lookAt &&
+                     (At<uint8_t>(self, cam::AimRig) == 0 || c.aimCamera);
     if (!own) o.returning = false;
     uint8_t lookEnabled = 0;
     if (own) {
@@ -454,7 +535,116 @@ static void __fastcall HookQfpsUpdate(uint32_t self, void* edx, uint32_t arg) {
         At<float>(self, cam::LookH) = 0.0f;
     }
     PoseMirror mirror;
-    if (fc.leftShoulder) mirror.Apply(self);
+    // The game's own aim side is per character (in game, Chris aims with the character on one side, Sheva the other),
+    // so a fixed rule is wrong for one of them.  It is measured instead, but only while NOT mirroring and only during
+    // the aim, over three consecutive frames of the same sign, so the mirror cannot feed back into its own measurement
+    // (that feedback made the pose x alternate +40/-40 in an earlier build).  Until it is known the aim is not
+    // mirrored at all.
+    {
+        static uint8_t sideFrames[4] = {};
+        static bool sideValue[4] = {};
+        static uint32_t sideFor[4] = {};
+        const bool rigNow = At<uint8_t>(self, cam::AimRig) == 1;
+        // The measurement is remembered per character: repeating it on every aim made the first frames of each aim
+        // run unmirrored and then snap over, which is the twitch that showed up now and then.
+        if (sideFor[idx] != fc.character) {
+            sideFor[idx] = fc.character;
+            fc.aimSideKnown = false;
+            sideFrames[idx] = 0;
+        }
+        if (rigNow) {
+            if (!fc.aimSideKnown) {
+                const uint32_t pp = At<uint32_t>(self, kPosePtrs + 3 * 4);  // first of the three aim poses
+                const float* pose = Readable((void*)pp, 0x28) ? (const float*)pp : (const float*)(self + kInlinePoses[3]);
+                const bool side = pose[0] < 0.0f;  // +X is the character's left: eye.x < 0 => character on the left
+                if (sideFrames[idx] == 0 || side != sideValue[idx]) {
+                    sideValue[idx] = side;
+                    sideFrames[idx] = 1;
+                } else if (sideFrames[idx] < 3) {
+                    ++sideFrames[idx];
+                }
+                if (sideFrames[idx] >= 3) {
+                    fc.gameCharLeft = side;
+                    fc.aimSideKnown = true;
+                    Log("shoulder: game aims with the character on the %s (pose x %+.1f)", side ? "left" : "right",
+                        pose[0]);
+                }
+            }
+            fc.mirrorAim = fc.aimSideKnown && (fc.charLeft != fc.gameCharLeft);
+        } else {
+            sideFrames[idx] = 0;
+            fc.mirrorAim = false;  // never outside the aim: the measurement below must read the game's own pose
+        }
+    }
+    // Never mirror in a scope: the scope is drawn by the weapon camera (uCameraWep) with its own poses, so flipping
+    // the QFPS poses there is not what the player sees - it only fights the weapon camera and showed up as a twitch
+    // when moving while scoped.
+    if (fc.mirrorAim) {
+        const uint32_t chM = At<uint32_t>(self, cam::Parent);
+        const bool scopedM = chM && Readable((void*)chM, 0x3000) && At<uint8_t>(chM, ch::Scope) != 0;
+        if (!scopedM) mirror.Apply(self);
+    }
+    // Aim pitch hand-off, measured from the aimdbg samples: the game's vertical look channel (cam::LookV) tracks
+    // the view pitch as  lookV = -pitch / 55 deg  (camPitch -16.3 deg -> lookV +0.319, -27.6 -> +0.509).  Carrying
+    // the orbit pitch here, before the game's own camera update, makes the aim start where the player was looking;
+    // the earlier attempt used the opposite sign, which is why it looked unchanged.
+    {
+        const bool rigNow = At<uint8_t>(self, cam::AimRig) == 1;
+        if (rigNow && !g_lastAimRig[idx]) {
+            // Restored: the run that the user reported as "basically done" carried the pitch here, BEFORE the game's
+            // camera update, with the measured sign.  Removing it (to chase a one-frame jump) is what made the aim
+            // stop following the pitch for a plain gun.
+            // REMOVED: the LookV seed.  Report (3440x1440, Sheva): aiming at the sky and pressing aim/cancel repeatedly
+            // walked the aim from the sky down to the ground without moving the camera.  A seed that the game converts
+            // back through its own scale loses a little pitch per aim when the two scales differ, and the loss adds up
+            // over presses - exactly that drift.  The game keeps its aim pitch between aims, so no seed is needed for a
+            // stable result; fc.pitch below only FOLLOWS the game's pitch, it no longer writes into it.
+            g_aimSeedFrames[idx] = 0;
+            // lookV alone does not hold: the game recomputes it every frame and the entry pitch was gone within
+            // 0.35 s (trace: camPitch -14.9 at "in", +5.5 at "mid").  The character's aim angles do hold, so they
+            // are seeded once as well, here, before the game's camera update uses them.
+            const uint32_t chA = At<uint32_t>(self, cam::Parent);
+            if (chA && Readable((void*)chA, 0x3000)) {
+                // Absolute aim-pitch hand-off: the character's aim angles are set to the view pitch once per aim.  This
+            // is an absolute write (not a delta and not the LookV channel), so repeated aims converge to the same value
+            // instead of accumulating; the LookV write stays removed because that one WAS additive and drifted.
+            if (chA && Readable((void*)chA, 0x3000)) {
+                At<float>(chA, 0x2908) = fc.pitch;
+                At<float>(chA, 0x290C) = fc.pitch;
+            }
+                // The aim POINT, not only the angles: the game derives the aim direction (and the scope's, and the
+                // knife's, neither of which goes through the bullet convergence the plain gun now uses) from
+                // ch+0x2870, a world point along the aim ray.  Put it on the free camera's ray at the moment the aim
+                // starts, from the character's chest, so every aiming mode begins where the player was looking.
+                float pos[3];
+                CharacterWorldPos(chA, pos);
+                const float cy2 = cosf(fc.pitch), sy2 = sinf(fc.pitch);
+                const float dx2 = sinf(fc.yaw) * cy2, dy2 = -sy2, dz2 = cosf(fc.yaw) * cy2;
+                At<float>(chA, 0x2870) = pos[0] + dx2 * 4000.0f;
+                At<float>(chA, 0x2874) = pos[1] + 90.0f + dy2 * 4000.0f;
+                At<float>(chA, 0x2878) = pos[2] + dz2 * 4000.0f;
+                At<float>(chA, 0x2700) = At<float>(chA, 0x2870);
+                At<float>(chA, 0x2704) = At<float>(chA, 0x2874);
+                At<float>(chA, 0x2708) = At<float>(chA, 0x2878);
+            }
+            AimTrace(self, idx, "in");
+        }
+        // One more sample a moment later and one when the aim ends: together they show which field the game's aim
+        // actually follows while the player moves the mouse.
+        if (rigNow) {
+            static double traceAt[4] = {};
+            const double tNow = NowSec();
+            if (traceAt[idx] == 0) traceAt[idx] = tNow;
+            if (tNow - traceAt[idx] > 0.35 && g_lastAimRig[idx]) { traceAt[idx] = 0; AimTrace(self, idx, "mid"); }
+        } else if (g_lastAimRig[idx]) {
+            AimTrace(self, idx, "out");
+        }
+        g_lastAimRig[idx] = rigNow;
+    }
+    // The old post-update seed of ch+0x2908/+0x290C is gone.  Those are NOT the aim pitch: when they were written the
+    // values accumulated (+91.7, +103.1 deg), i.e. they are angles that the game keeps adding to, and writing them for
+    // the first frames of every aim is one of the things that made the character twitch when aiming started.
+    g_aimSeedFrames[idx] = 0;
     ViewEdit view;
     view.Before(self);
     SetEscapeEar(self, idx, fc.leftShoulder);
@@ -471,9 +661,40 @@ static void __fastcall HookQfpsUpdate(uint32_t self, void* edx, uint32_t arg) {
     float* eye = (float*)(self + cam::EyeAim);
     float* up = (float*)(self + cam::UpAim);
     float* tgt = (float*)(self + cam::TargetAim);
+    // Cache the camera ray for the crosshair code: with the free camera the barrel no longer points where the player
+    // looks, and the game fires along the barrel, so the shot is put on this ray instead (HookLaserRaycast).
+    if (At<uint8_t>(self, cam::AimRig) == 1) {
+        float d[3] = {tgt[0] - eye[0], tgt[1] - eye[1], tgt[2] - eye[2]};
+        const float len = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+        if (len > 1.0f) {
+            for (int i = 0; i < 3; ++i) {
+                g_aimEye[i] = eye[i];
+                g_aimDir[i] = d[i] / len;
+            }
+            g_aimRayValid = true;
+        }
+    } else {
+        g_aimRayValid = false;
+    }
     const float dx = tgt[0] - eye[0], dz = tgt[2] - eye[2];
     if (dx * dx + dz * dz < 1.0f) return;
     const float baseYaw = atan2f(dx, dz);
+    // Leaving the aim: adopt the pitch the game ended on, otherwise the orbit snaps the view back to the pitch it
+    // had before the aim (the "camera returns to the angle I set" report) after the player had aimed somewhere else.
+    {
+        const bool rigNow = At<uint8_t>(self, cam::AimRig) == 1;
+        if (!rigNow && g_lastAimRig[idx]) {
+            const float len0 = sqrtf(dx * dx + dz * dz);
+            if (len0 > 0.001f) {
+                float p = atan2f(eye[1] - tgt[1], len0);
+                if (p > Rad(55.0f)) p = Rad(55.0f);
+                if (p < Rad(-40.0f)) p = Rad(-40.0f);
+                fc.pitch = p;
+                Log("aim exit: adopted game pitch %+.1f deg", p * 57.3f);
+            }
+        }
+        g_lastAimRig[idx] = rigNow;
+    }
     if (!fc.initialised || now - fc.lastCameraUpdate > 0.5) {
         fc.yaw = baseYaw;
         fc.pitch = DefaultCameraPitch();
@@ -522,12 +743,62 @@ static void __fastcall HookQfpsUpdate(uint32_t self, void* edx, uint32_t arg) {
         Orbit(fc, o, dt, eye, tgt);
     } else {
         fc.yaw = baseYaw;  // aiming, looking at the partner or scripted: the game's camera, followed by the orbit
+        // Shoulder in cover.  Low cover and wall cover use the game's own camera (the orbit is off there), so the
+        // wanted side has no orbit shoulder to move and the swap key looked dead.  The game's camera is shifted
+        // sideways here instead: eye and target move together along the camera's right axis, which is exactly what a
+        // shoulder swap looks like, without taking the cover camera away from the game.
+        {
+            const uint32_t chC = At<uint32_t>(self, cam::Parent);
+            if (chC && Readable((void*)chC, 0x3000) && (At<uint32_t>(chC, 0x2D8C) & 0xF00) != 0) {
+                const float ox = tgt[0] - eye[0], oz = tgt[2] - eye[2];
+                const float l = sqrtf(ox * ox + oz * oz);
+                if (l > 1.0f) {
+                    const float s = fc.charLeft ? 22.0f : -22.0f;
+                    const float rx = oz / l, rz = -ox / l;
+                    eye[0] += rx * s;
+                    eye[2] += rz * s;
+                    tgt[0] += rx * s;
+                    tgt[2] += rz * s;
+                }
+            }
+        }
+        // Follow the pitch too, not only the yaw.  While aiming the game owns the view and the mouse pitches it, but
+        // fc.pitch stayed frozen at the pre-aim value: when the aim ended the orbit put that old pitch back -- the
+        // "the camera returns to the angle it had before aiming" report.  Adopting the view pitch every frame keeps
+        // the orbit in step, so handing the view back is seamless.
+        {
+            const float len = sqrtf(dx * dx + dz * dz);
+            // Only adopt the view pitch when the camera is not looking almost straight up or down: with len near zero
+            // the atan2 saturates and fc.pitch jumped to its clamps (+55 / -40), which then went into everything that
+            // builds a direction from fc.pitch (the knife aim point showed it in the log).  A flat view always has a
+            // horizontal distance of hundreds of units, so this guard only rejects degenerate frames.
+            if (c.aimPitchFromMouse) {
+                // The mod owns the aim pitch: the mouse feeds fc.pitch and the result goes into the look channel every
+                // frame, so the aim sits exactly where the camera points and nothing accumulates between aims.
+                float d = g_aimMouseDY * g_aimMouseScale * (g_aimMouseInvert ? -1.0f : 1.0f);
+                fc.pitch += d;
+                if (fc.pitch > Rad(55.0f)) fc.pitch = Rad(55.0f);
+                if (fc.pitch < Rad(-40.0f)) fc.pitch = Rad(-40.0f);
+                At<float>(self, cam::LookV) = -fc.pitch / Rad(55.0f);
+                g_aimPitchLast = fc.pitch;
+            } else if (len > 10.0f) {
+                float vp = atan2f(eye[1] - tgt[1], len);
+                if (vp > Rad(55.0f)) vp = Rad(55.0f);
+                if (vp < Rad(-40.0f)) vp = Rad(-40.0f);
+                fc.pitch = vp;
+                g_aimPitchLast = vp;
+            }
+        }
         if (c.meleeOnly) {
             const float len = sqrtf(dx * dx + dz * dz);
             fc.pitch = atan2f(eye[1] - tgt[1], len);
             if (fc.pitch > Rad(55.0f)) fc.pitch = Rad(55.0f);
             if (fc.pitch < Rad(-40.0f)) fc.pitch = Rad(-40.0f);
         }
+        // The per-frame write of ch+0x2908/+0x290C that was here is REMOVED again: rewriting the character's aim
+        // angles every frame resets the game's own pitch integrator, so the pitch could no longer be adjusted while
+        // aiming (reported straight after that build).  The game owns the aim pitch; the mod only seeds it once when
+        // the aim starts and otherwise leaves it alone.
     }
     // Blend for a moment whenever the camera changes hands, from wherever the last frame left it.
     // Mode=MeleeCamera blends the hand-over to and from the game's camera itself. In the full mode the camera
@@ -587,7 +858,7 @@ void InitCameraHooks() {
     else
         Log("hook QFPS update failed");
     static const BYTE sigCtrl[] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF0, 0x83, 0xEC, 0x74, 0x53, 0x56, 0x8B, 0xF1};
-    if (SafeEqual((void*)kFnCameraCtrlUpdate, sigCtrl, sizeof(sigCtrl)) &&
+    if (HookSite((void*)kFnCameraCtrlUpdate, sigCtrl, sizeof(sigCtrl)) &&
         MH_CreateHook((void*)kFnCameraCtrlUpdate, (void*)HookCtrlUpdate, (void**)&oCtrlUpdate) == MH_OK &&
         MH_QueueEnableHook((void*)kFnCameraCtrlUpdate) == MH_OK)
         Log("hook camera ctrl update at %08x", kFnCameraCtrlUpdate);

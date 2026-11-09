@@ -16,9 +16,20 @@
 #include "balance.h"
 #include "inventory.h"
 #include "kbinput.h"
+#include "movehook.h"
 #include <d3d9.h>
 #include <math.h>
 #include "MinHook.h"
+// The game is not always loaded at 0x400000 (its protector can rebase it), so every vtable/address comparison has to be
+// relative to the module base.  These take the original address (what the disassembly shows) and return the live one.
+static uint32_t ModuleBase()
+{
+    static uint32_t base = 0;
+    if (!base) { HMODULE h = GetModuleHandleA("re5dx9.exe"); base = h ? (uint32_t)(uintptr_t)h : 0x00400000u; }
+    return base;
+}
+static inline uint32_t VaOf(uint32_t originalVa) { return ModuleBase() + (originalVa - 0x00400000u); }bool g_throwAimHeld = false;
+bool g_throwTail = false;   // a thrown item is playing out: keep the legs off
 
 using namespace re5;
 
@@ -98,17 +109,30 @@ static float DeadZone(float v, float dz) {
 // Wesker's dash in The Mercenaries: the knee_bazooka actions (start, run, Knee Cannon, stop, turns right/left/back).
 static bool IsDash(uint32_t id) { return id >= 0x47 && id <= 0x4D; }
 
-// Character kind (0x715B90: DTI id >> 8 & 0xFFFF): 0 Chris, 1 Sheva, 2 Jill, 3 Wesker, 4 and up the Reunion cast.
-static bool IsWesker(uint32_t character) {
-    static int ok = 0;  // 1 = the function is the expected one; -1 = not (then nobody is Wesker)
+// Character kind from the game's function at 0x715B90 (DTI id >> 8 & 0xFFFF).  Known values on this build:
+// 0 = Chris, 1 = Sheva, 3 = Wesker (the dash check).  The kind is logged once per character so the shoulder table
+// (ShoulderLeftKinds) can be corrected from a single run.
+static int CharacterKind(uint32_t character) {
+    static int ok = 0;  // 1 = the function is the expected one; -1 = not (then the kind is unknown)
     if (!ok) {
         static const BYTE sig[] = {0x8B, 0x4C, 0x24, 0x04, 0x8B, 0x01, 0x8B, 0x50, 0x10,
                                    0xFF, 0xD2, 0x8B, 0x40, 0x20, 0xC1, 0xE8, 0x08};
         ok = SafeEqual((void*)0x00715B90, sig, sizeof(sig)) ? 1 : -1;
-        if (ok < 0) Log("character kind: unexpected code at 00715b90, WeskerDash left off");
+        if (ok < 0) Log("character kind: unexpected code at 00715b90, shoulder auto and WeskerDash off");
     }
-    return ok > 0 && ((uint32_t(__cdecl*)(uint32_t))0x00715B90)(character) == 3;
+    if (ok < 0) return -1;
+    return (int)(((uint32_t(__cdecl*)(uint32_t))0x00715B90)(character) & 0xFFu);
 }
+static bool IsWesker(uint32_t character) { return CharacterKind(character) == 3; }
+// Plain-gun zoom state, read by the camera through ZoomFovExtra().
+static int g_zoomStep = 0;
+static float g_zoomFov = 0.0f;
+static bool g_zoomFPrev = false, g_zoomCPrev = false;
+float ZoomFovExtra() { return g_zoomFov; }
+// The wanted shoulder side ("the character stands on the left of the screen").  One local player, one value: it is
+// NOT reset by a character change or by the camera state being handed back to the game, because those happen between
+// two presses (the log showed every press starting from the same side again).
+static bool g_charLeftSide = true;
 
 // Whether the game would reload now: its own test before a reload (0xB83E67) - the item in hand (0xC4B700(inv, 0xE))
 // is a gun whose magazine is not full and that has spare ammo (0xC4DE50). Without the expected code: always.
@@ -199,16 +223,27 @@ struct ControlsState {
     uint32_t runSig = 0;        // the canonical button this run uses (A; L3 without the free camera in types C/D)
     bool kbRunPress = false;    // keyboard: the run key went down while moving (in the inventory it runs, no confirm)
 };
-static ControlsState g_states[4];
+static ControlsState g_states[8];
 
 static ControlsState& StateFor(uint32_t pad) {
     for (auto& s : g_states)
         if (s.pad == pad) return s;
+    // A pad object seen for the first time (new game, chapter restart). Nothing releases the entries of pad objects
+    // that are gone, so the table fills up over restarts (two entries per restart in split screen). Take a free
+    // entry or, when there is none, the one unused for longest. Always reusing one fixed entry made the two local
+    // players take it from each other every frame: their state started from scratch each time (no frame time, no
+    // run toggle, no steering).
+    ControlsState* slot = nullptr;
     for (auto& s : g_states)
-        if (!s.pad) { s = ControlsState{}; s.pad = pad; return s; }
-    g_states[0] = ControlsState{};
-    g_states[0].pad = pad;
-    return g_states[0];
+        if (!s.pad) { slot = &s; break; }
+    if (!slot) {
+        slot = &g_states[0];
+        for (auto& s : g_states)
+            if (s.last < slot->last) slot = &s;
+    }
+    *slot = ControlsState{};
+    slot->pad = pad;
+    return *slot;
 }
 
 bool GunAimHeld(uint32_t character) {
@@ -254,7 +289,7 @@ static void MeleeOnlyControls(ControlsState& S, uint32_t padObj, uint32_t charac
     fc.active = melee;
     fc.activeTime = Now();
     fc.noAimRig = false;
-    fc.leftShoulder = false;  // the shoulder swap belongs to the full mode
+    fc.charLeft = false; fc.leftShoulder = false; fc.mirrorAim = false;  // the shoulder swap belongs to the full mode
     if (kb) {
         // Keyboard/mouse: the mouse turns the camera during the attack (the game's own mouse turning is off then).
         if (melee && fc.initialised && !JustActivated()) {
@@ -379,9 +414,14 @@ static void InventoryWalk(ControlsState& S, uint32_t padObj, uint32_t character,
     }
     const bool orbit = freeCam && fc.initialised;
     const bool runGait = changing && wantRun && stickMag >= 0.3f;  // the gait goes on, as in ApplyControls
-    const bool legs = AimWalkUpdate(character, changing && !orbit ? st.lx : 0.0f,
-                                    changing ? (orbit ? (back ? -stickMag : stickMag) : st.ly) : 0.0f, changing,
-                                    MoveSpeedFor(character, runGait ? 5 : 2), dt, runGait, changing, keyboard);
+    // The knife swing must drive the legs like a normal move, otherwise the character can only walk (or not move at all)
+    // during it: the layer is fed whenever the swing runs, and the run gait is allowed there too.
+    const uint32_t aidSwingNow = At<uint32_t>(character, ch::ActionId);
+    const bool swingNow = (aidSwingNow == aid::KnifeAttack);
+    const bool changingNow = changing || swingNow;
+    const bool legs = AimWalkUpdate(character, changingNow && !orbit ? st.lx : 0.0f,
+                                    changingNow ? (orbit ? (back ? -stickMag : stickMag) : st.ly) : 0.0f, changingNow,
+                                    MoveSpeedFor(character, runGait ? 5 : 2), dt, runGait || swingNow, changingNow, keyboard);
     NetLocalFrame(character, free, legs);
     // Standing with the stick let go: the game's own inventory stop (nothing to walk).
     if (!(free || window) || (lMag < 0.3f && (action == plact::Wait || action == plact::Relax))) return;
@@ -494,9 +534,25 @@ static void ApplyControls(uint32_t padObj, uint32_t character) {
             physTrg &= ~P_L3;
         }
     }
-    const bool aiming = (phys & P_LT) != 0;
-    const bool knife = (phys & P_LB) != 0;
-    const bool aimHeld = aiming || knife;
+    const uint32_t aidGate = At<uint32_t>(character, ch::ActionId);
+    // A climb (and a few other scripted states) report the invalid-action sentinel 0x80000000, which the ranges below do
+    // not cover - that is why aiming on a ladder still turned the character.
+    // Every character (and every costume) has its own ids for melee, executions, grabs and reactions - Excella's melee
+    // is 0xAC, for instance - so an explicit list of "busy" ranges can never be complete.  The controllable states are
+    // the exceptions and they are few: locomotion (0x00-0x09) and the weapon states (0x1B-0x27).  Everything else is a
+    // locked state, which is what disables the aim and the knife key.
+    const bool busyAction = aidc::Locked(aidGate);   // one classifier for every subsystem (see re5.h)
+    const bool aiming = ((phys & P_LT) != 0) && !busyAction;
+    const bool knifeKey = ((phys & P_LB) != 0) && !busyAction;   // the knife is ignored during interactions too   // the aim would turn the character mid-action
+    const bool knife = knifeKey;
+    // While a thrown item plays out the mod keeps treating the player as aiming, exactly as if the button were still held.
+    // Every "aim ended" path (camera hand-back, facing, leg handover) is gated on this flag, and those are what made the
+    // recovery twitch when the button was released early.  The pad bit alone was not enough - this is the internal state.
+    const uint32_t vtThrowNow = Readable((void*)(character + ch::CurAction), 4) ? At<uint32_t>(character + ch::CurAction, 0) : 0;
+    const bool throwHeld = (vtThrowNow == VaOf(0x0104456C) || vtThrowNow == VaOf(0x01044F38));
+    if (throwHeld) { g_throwAimHeld = true; } else { g_throwAimHeld = false; }
+    g_throwAimHeld = throwHeld;   // the game answers the aim key from this, not from the pad
+    const bool aimHeld = aiming || knife || throwHeld;
     // KnifeFromAim: LB pressed while LT is held readies the knife from the gun aim (the game's own knife + gun bits
     // together); LT pressed while the knife is out still goes to the gun.
     if (physTrg & P_LT) S.knifeLast = false;
@@ -508,16 +564,78 @@ static void ApplyControls(uint32_t padObj, uint32_t character) {
     // Every local player has a free camera of their own (split screen: on their own camera controller, whatever
     // device each one plays with).
     FreeCam& fc = CamFor(character);
+    if (fc.character != character) {
+        g_zoomStep = 0;
+        g_zoomFov = 0.0f;
+    }
     fc.character = character;
-    const bool freeCam = c.freeCamera;
+    // Plain-gun zoom (F in, C out), keyboard only, never in a scope (that one has its own zoom); the level is
+    // dropped when the aim ends so every aim starts at 1x, like the scope.
+    if (c.zoomKeys && kbm && KbLayerFor(character)) {
+        if (!aimHeld || At<uint8_t>(character, ch::Scope)) {
+            g_zoomStep = 0;
+        } else {
+            const bool fDown = (GetAsyncKeyState('F') & 0x8000) != 0;
+            const bool cDown = (GetAsyncKeyState('C') & 0x8000) != 0;
+            if (fDown && !g_zoomFPrev && g_zoomStep < c.zoomMaxStep) ++g_zoomStep;
+            if (cDown && !g_zoomCPrev && g_zoomStep > 0) --g_zoomStep;
+            g_zoomFPrev = fDown;
+            g_zoomCPrev = cDown;
+        }
+        g_zoomFov = c.zoomFovStep * (float)g_zoomStep;
+        static int loggedStep = 0;
+        if (g_zoomStep != loggedStep) {
+            loggedStep = g_zoomStep;
+            if (g_zoomStep != 0) Log("zoom: step %d, fov %+.0f", g_zoomStep, g_zoomFov);
+        }
+    } else {
+        g_zoomStep = 0;
+        g_zoomFov = 0.0f;
+    }
+    // Keyboard shoulder key (Controls/ShoulderKey, default B): raw key, aiming or not, independent of the game's own
+    // bindings.  `keyToggled` records that this frame's press was consumed here: the key can also be the game's own
+    // "locate partner" button, which the pad path below maps to partnerBit and would flip the same value a second time
+    // in the same frame (two flips = no visible change; three presses in the log all reported the same side).
+    bool keyToggled = false;
+    bool shoulderKeyDown = false;
+    if (c.shoulderSwapAlways && c.shoulderKey[0] && !At<uint8_t>(character, ch::Scope)) {
+        const int vk = toupper((unsigned char)c.shoulderKey[0]);
+        const bool down = vk > 0 && (GetAsyncKeyState(vk) & 0x8000) != 0;
+        static bool keyPrev = false;
+        shoulderKeyDown = down;
+        if (down && !keyPrev) {
+            g_charLeftSide = !g_charLeftSide;
+            keyToggled = true;
+            Log("shoulder: key '%c' -> character %s (leftShoulder %d, mirrorAim %d)", vk,
+                g_charLeftSide ? "left" : "right", (int)!g_charLeftSide, (int)g_charLeftSide);
+        }
+        keyPrev = down;
+    }
+    // The same physical key can also be the game's "locate partner" binding (B is one of them on the keyboard).  While
+    // it is held for the shoulder, the locate action is withheld, so one press does one thing.
+    if (shoulderKeyDown) {
+        phys &= ~partnerBit;
+        S.prevPhys &= ~partnerBit;
+    }
+
+    // Derive the two mechanisms from the wanted side, every frame.  The contexts below (mounted guns, the original
+    // button layout, cover) clear them again for their own frames, which is what we want: they hand the camera back
+    // to the game.  Outside them the player's choice always wins.
+    fc.charLeft = g_charLeftSide;
+    fc.leftShoulder = !fc.charLeft;
+    fc.mirrorAim = fc.charLeft;
+    // ch+0x2D8C: 0x4000 riding something, with 0x80 a gun emplacement, 0x40 the jeep gun, 0x20 the airboat driver
+    // (the airboat passenger has only 0x4000 and keeps the mod's controls).
+    const uint32_t ride = At<uint32_t>(character, 0x2D8C);
+    // Low cover and wall cover (0x100, 0x200, 0x400, 0x800): the game's own camera and sticks, as with FreeCamera=0
+    // (the camera follows the game's own, the sticks move and aim as the game does them).
+    const bool covered = (ride & 0xF00) != 0;
+    const bool freeCam = c.freeCamera && !covered;
 
     // The in-game inventory reads this pad with the player's own button layout (A = item menu, RB = partner's
     // items): while it is open the game's buttons are left alone. With KeyboardMouse=0 keyboard/mouse play is left to
     // the game entirely (its own camera too). On a mounted gun or a vehicle gun the game's own controls apply.
     const uint32_t idNow = At<uint32_t>(character, ch::ActionId);
-    // ch+0x2D8C: 0x4000 riding something, with 0x80 a gun emplacement, 0x40 the jeep gun, 0x20 the airboat driver
-    // (the airboat passenger has only 0x4000 and keeps the mod's controls).
-    const uint32_t ride = At<uint32_t>(character, 0x2D8C);
     const bool mounted = ((ride & 0x4000) && (ride & 0xE0)) || (idNow >= 0x6A && idNow <= 0x6E);
     const bool dash = c.weskerDash && IsDash(idNow);  // Wesker's dash: the game's controls and camera
 #if RE3C_DEV
@@ -547,7 +665,7 @@ static void ApplyControls(uint32_t padObj, uint32_t character) {
         fc.noAimRig = false;  // in the inventory fc.active and fc.yaw stay: the camera keeps its place
         if ((keyboard && !kbm) || mounted) {
             fc.active = false;
-            fc.leftShoulder = false;  // the game's own cameras must not stay mirrored
+            fc.charLeft = false; fc.leftShoulder = false; fc.mirrorAim = false;  // the game's own cameras must not stay mirrored
         }
         AimWalkUpdate(character, 0.0f, 0.0f, false, 0.0f, (float)dt);
         NetLocalFrame(character, InLocomotion(character), false);
@@ -574,14 +692,33 @@ static void ApplyControls(uint32_t padObj, uint32_t character) {
         if (knife && (!aiming || knifeWins)) out |= P_LT;
         // RT is the game's fire button everywhere, as in control type D (in the aim, and e.g. Wesker's Knee Cannon).
         if (phys & P_RT) out |= P_X;
-        // RB (L3 with RunButton=RB): locate the partner; while aiming it swaps the camera to the other shoulder (in
-        // a scope it is the zoom button of ScopeWalk instead).
-        if (aimHeld) {
-            if ((physTrg & partnerBit) && !At<uint8_t>(character, ch::Scope)) fc.leftShoulder = !fc.leftShoulder;
+        // RB (L3 with RunButton=RB): swap the camera to the other shoulder.  With ShoulderSwapAlways (default) it
+        // works whether aiming or not, like a modern TPS: the physical LB keeps the knife outside the aim and the
+        // RB-to-knife forwarding is gone.  In a scope the key stays the ScopeWalk zoom button.
+        if (c.shoulderSwapAlways) {
+            // Pad: the physical button is also the game's locate-partner.  Swapping only while aiming keeps both usable:
+            // outside the aim the button goes back to the game, so the partner camera still works.  The keyboard key
+            // (ShoulderKey, B by default) swaps at any time and has no conflict.
+            // Keyboard players swap with ShoulderKey (B); this branch is the pad button only.  Without the !kbm guard a
+            // keyboard locate-partner press (which maps to the same pad bit) swapped the shoulder while aiming.
+            if (!kbm && !keyToggled && (physTrg & partnerBit) && aimHeld && !At<uint8_t>(character, ch::Scope)) {
+                g_charLeftSide = !g_charLeftSide;
+                out &= ~partnerBit;   // consumed: do not also trigger whatever the game binds to this button
+            }
+            // Outside the aim the button is not consumed by the mod.  It is NOT forwarded either: with RunButton=L3 the
+            // pad bit involved is the game's map button, and forwarding it opened the map instead of locating the partner.
+        } else if (aimHeld) {
+            if (!kbm && !keyToggled && (physTrg & partnerBit) && !At<uint8_t>(character, ch::Scope)) { g_charLeftSide = !g_charLeftSide; }
         } else if (phys & partnerBit) {
             out |= P_LB;
         }
-        if (phys & P_BACK) out |= P_RB;  // map
+        // Map and locate-partner are separate actions in the engine (0x15 and 0x0B, measured) and both used to be
+        // dropped: map was sent to the pad's RB and locate was not sent at all.  Each now goes to the pad button the
+        // game uses for it.
+        if (phys & P_BACK) out |= P_RB;          // map    -> the pad's RB (measured: RB opens the map)
+        // Locate partner is only forwarded outside the aim: while aiming it must do nothing (holding the aim and looking
+        // at the partner fight over the same camera).
+        if ((phys & partnerBit) && !aiming) out |= P_LB;   // locate partner -> the pad's LB (RB is the map here)
         if (phys & P_Y) out |= P_Y;
         if (phys & P_B) out |= P_B;
         // R3 where the game has a use for it: in the aim (RPG-7 NVS night vision; StickClicks) and for Wesker outside
@@ -595,7 +732,20 @@ static void ApplyControls(uint32_t padObj, uint32_t character) {
         if (dash && (kbm ? (phys & runBit) : (phys & P_A))) out |= P_A;
     } else {
         out = on;
-        fc.leftShoulder = false;  // no swap button in the original layout
+        fc.charLeft = false; fc.leftShoulder = false; fc.mirrorAim = false;  // no swap button in the original layout
+    }
+    if (covered) {
+        // In low cover and wall cover the game's own camera positions the character, so the orbit shoulder stays off.
+        // The old code also cleared the wanted side outright, which is why the swap key "did nothing" while leaning on
+        // a wall: the aim mirror is what the player actually swaps for there, and it is now kept.  CoverShoulder=0
+        // restores the previous behaviour (everything cleared) if a cover pose ever looks wrong mirrored.
+        if (c.coverShoulder) {
+            fc.charLeft = g_charLeftSide;
+            fc.leftShoulder = false;
+            fc.mirrorAim = g_charLeftSide;
+        } else {
+            fc.charLeft = false; fc.leftShoulder = false; fc.mirrorAim = false;
+        }
     }
     S.character = character;
     S.gunAim = c.remapButtons ? (aiming && !knifeWins) : (on & P_RT) != 0;
@@ -637,7 +787,8 @@ static void ApplyControls(uint32_t padObj, uint32_t character) {
             S.reload = ReloadPhase::Request;
             S.reloadT = 0;
             S.reloadTries = 0;
-            S.reloadMove = !aiming && !(ride & 0xF00);
+            S.reloadMove = c.reloadWalk &&
+                       !(ride & 0xF00);
         }
         S.reloadT += dt;
         // The prompt check may come after the pad in a frame: a request that meets an X prompt right away is dropped.
@@ -669,7 +820,9 @@ static void ApplyControls(uint32_t padObj, uint32_t character) {
     } else {
         S.reload = ReloadPhase::Idle;  // switched off in the ini meanwhile
     }
-    if (S.reloadMove && (aimHeld || (S.reload == ReloadPhase::Idle && !AimWalkState(character)))) S.reloadMove = false;
+    if (S.reloadMove && (S.reload == ReloadPhase::Idle && !AimWalkState(character))) S.reloadMove = false;
+    if (false && ((aimHeld && At<uint8_t>(character, ch::Scope) == 0) ||
+                          (S.reload == ReloadPhase::Idle && !AimWalkState(character)))) S.reloadMove = false;
     const bool reloadMove = S.reloadMove;
     // Switching weapons (d-pad, keys 1-9, the wheel): the switch plays standing; the leg layer keeps walking, as for
     // a reload on the move. While aiming, the aim walk carries on through the switch by itself (SwitchWalk too).
@@ -743,9 +896,6 @@ static void ApplyControls(uint32_t padObj, uint32_t character) {
     const bool busy = aimHeld || dash || (S.reload != ReloadPhase::Idle && !reloadMove);
     bool snapNow = false;
     bool backStep = false;  // BackStep: this frame steps back toward the camera
-    // Crouched behind low cover the right stick (keyboard: the mouse) also turns the crouch, as in the game
-    // (CoverTurn); the camera turns with it.
-    const bool lowCover = freeCam && c.coverTurn && (ride & 0x100) && !(ride & 0x200);
     if (freeCam) {
         // Aim where you look: raising the gun or knife turns the character to the camera, only where the game lets it
         // aim any way (free locomotion, lowering the gun or knife, a reload or a weapon switch, which go straight on
@@ -755,12 +905,32 @@ static void ApplyControls(uint32_t padObj, uint32_t character) {
         if (pressNow) {
             S.snapPending = true;
             S.snapYaw = fc.yaw;
+            // Aim pitch hand-off through the game's own input.  The aim angle is produced by the pad-update chain
+            // (0xB8A3E0 -> 0xB86CD0) from the mouse/stick, and writing the aim state directly freezes its integrator
+            // (proved by the mod35 experiment), while writing the camera look channel does not persist.  So the
+            // difference between the view pitch and the pitch the game's aim had last time is injected as mouse
+            // movement on the press frame: the game integrates it like any other mouse motion and keeps control.
+            if (kbm && c.aimPitchSnap && !JustActivated()) {
+                float delta = fc.pitch - AimPitchLast();
+                if (delta > Rad(60.0f)) delta = Rad(60.0f);
+                if (delta < Rad(-60.0f)) delta = Rad(-60.0f);
+                const float unit = MouseUnitRadians() * c.mouseSensitivity * c.mouseVertical;
+                if (fabsf(delta) > 0.01f && unit > 1e-6f) {
+                    const float inv = (MouseInvert() & 1) ? -1.0f : 1.0f;
+                    At<float>(padObj, 0x210) += delta / (unit * inv);
+                    Log("aim: pitch nudge %.1f deg -> %.2f mouse units", delta * 57.3f, delta / (unit * inv));
+                }
+            }
         }
         if (!aimHeld) S.snapPending = false;
         if (S.snapPending && fc.initialised && !(ride & 0x4F00) && !dash && !PromptUp(slot, P_LT | P_RT | P_LB)) {
+            // On the aiming PRESS the facing must go to the free view immediately, whatever the game was doing:
+            // the old condition also required a locomotion/transition state, so aiming from idle (and every scope
+            // entry, where the scope camera is the weapon camera and never reaches this hook) kept the character's
+            // old aim yaw -- the scope then pointed somewhere other than where the player was looking.  The later
+            // frames still use the narrow test, which is what keeps a scripted turn from being undone.
             const bool stance =
-                pressNow ? (InLocomotion(character) || action == plact::Turn180 || action == plact::ReadyEnd ||
-                            idNow == aid::KnifeEnd || action == plact::Reload || switching)
+                pressNow ? true
                          : (action == plact::ReadyBegin || idNow == aid::KnifeBegin);
             if (stance) {
                 SetCharacterYaw(character, S.snapYaw);
@@ -770,8 +940,59 @@ static void ApplyControls(uint32_t padObj, uint32_t character) {
         }
         // dev: keep the orbit camera while aiming (reserved[24] & 1024), to look at the legs from outside
         const bool devOrbit = DevMode() && (Bridge()->reserved[24] & 1024);
-        fc.active = !busy || devOrbit;
-        fc.noAimRig = reloadMove || changeMove || devOrbit;
+        // A melee/knife swing is "busy", which used to turn the orbit off; melee.cpp then skips the game's action
+        // camera for the swing, so NOBODY drove the view and the mouse did nothing at all during the slash.  While
+        // such an action runs, let the orbit own the view (it is the camera the mod already shows in the melee).
+        const bool camFreeAction = FreeCameraAction(character);
+        fc.active = !busy || devOrbit || camFreeAction;
+        // While the mod owns the view during an attack, the aim rig must go too.  camera.cpp only lets the orbit run
+        // when cam::AimRig == 0; a knife thrown from an aim hold (KnifeFromGun) keeps the rig set, so the orbit was
+        // skipped even though the action camera had been suppressed -- nobody updated the view and the mouse did
+        // nothing.  noAimRig drops the rig for the duration of the action, which is the same mechanism the mod uses
+        // for a reload on the move.
+        fc.noAimRig = reloadMove || changeMove || devOrbit || camFreeAction;
+        // Diagnostic: log every entry/exit of "the mod owns the view during an action" with the real action id, so
+        // one playthrough shows which id the knife uses and whether the orbit took the camera.
+        {
+            static int lastCamFree = -1;
+            const int nowFree = camFreeAction ? 1 : 0;
+            if (nowFree != lastCamFree) {
+                lastCamFree = nowFree;
+                Log("camera owner -> %s (action %02X busy=%d active=%d)", nowFree ? "MOD" : "GAME",
+                    (unsigned)At<uint32_t>(character, ch::ActionId), (int)busy, (int)fc.active);
+            }
+        }
+        // The sniper scope is left entirely to the game.  Its view is the weapon camera (uCameraWep) and its aim is
+        // the game's own scope aim; the mod must only stay out of the way, which is what the `!scopedNow` above does
+        // (it no longer zeroes the game's mouse turn while scoped).  Everything the mod used to inject here -- the
+        // orbit pitch drive, the lookV write in the controller hook -- is gone: two drivers fighting the stock one
+        // is what kept the scope from following in the first place.
+        if (busy && camFreeAction) {
+            // Camera-only turn during the swing: the movement/steering part of the !busy block below must not run.
+            if (kbm) {
+                if (!JustActivated()) {
+                    const float k = MouseUnitRadians() * c.mouseSensitivity;
+                    const uint32_t inv = MouseInvert();
+                    fc.yaw = WrapPi(fc.yaw - kb.mouseX * k * ((inv & 2) ? -1.0f : 1.0f));
+                    fc.pitch += kb.mouseY * k * c.mouseVertical * ((inv & 1) ? -1.0f : 1.0f);
+                }
+            } else {
+                const float rx = DeadZone(st.rx, 0.2f), ry = DeadZone(st.ry, 0.2f);
+                fc.yaw = WrapPi(fc.yaw - rx * Rad(c.cameraSpeed) * (float)dt);
+                fc.pitch -= (c.invertCameraY ? -ry : ry) * Rad(c.cameraPitchSpeed) * (float)dt;
+            }
+            if (fc.pitch > Rad(55.0f)) fc.pitch = Rad(55.0f);
+            if (fc.pitch < Rad(-40.0f)) fc.pitch = Rad(-40.0f);
+            if (physTrg & P_R3) {
+                fc.yaw = CharacterYaw(character);
+                fc.pitch = DefaultCameraPitch();
+            }
+            // Cover turns the free camera off entirely in this branch of the code (see the cover handling in
+            // ApplyControls), so the right stick is always neutralised while the mod owns the view here.
+            At<float>(padObj, pp::RAngle) = 0;
+            At<float>(padObj, pp::RMag) = 0;
+            out &= ~P_RS_DIRS;
+        }
         if (aimHeld || dash) S.swingT = -1;
         if (!busy && S.swingT >= 0) {
             // Quick turn: the camera swings round behind the new facing (eased, about a third of a second).
@@ -803,16 +1024,22 @@ static void ApplyControls(uint32_t padObj, uint32_t character) {
                 fc.yaw = CharacterYaw(character);
                 fc.pitch = DefaultCameraPitch();
             }
-            // The game must not turn the character with the right stick any more (crouched behind low cover it
-            // turns the crouch, as in the game).
-            if (!lowCover) {
-                At<float>(padObj, pp::RAngle) = 0;
-                At<float>(padObj, pp::RMag) = 0;
-                out &= ~P_RS_DIRS;
-            }
+            // The game must not turn the character with the right stick any more.
+            At<float>(padObj, pp::RAngle) = 0;
+            At<float>(padObj, pp::RMag) = 0;
+            out &= ~P_RS_DIRS;
             // Only once the reload has started (a refused request leaves the walk as it is).
-            const bool moveSteer = (reloadMove && c.reloadWalk && action == plact::Reload) || changeMove;
-            if (stickMag >= 0.3f && fc.initialised && S.quickTurnT < 0 && (InLocomotion(character) || moveSteer)) {
+            // Steering must work for the game's own (empty-magazine) reload too, not only for one the player started: without
+    // this the character walked in a straight line with a fixed direction.  Direction is taken whenever the reload action
+    // is running and ReloadWalk is on.
+    // Leaving the aim plays ReadyEnd for a moment; steering was not taken there, so the character kept the direction it
+    // had when the gun went down.  The fire action is included for the same reason.
+    const uint32_t aidSt = At<uint32_t>(character, ch::ActionId);
+    const bool knifeSt = (aidSt >= aid::KnifeBegin && aidSt <= aid::KnifeAttack);
+    const bool moveSteer = ((reloadMove || action == plact::Reload) && c.reloadWalk && action == plact::Reload) ||
+                           changeMove;
+                           ((action == plact::ReadyEnd || action == plact::Fire) && !aimHeld) || changeMove;
+            if (stickMag >= 0.3f && fc.initialised && S.quickTurnT < 0 && (InLocomotion(character) || moveSteer || knifeSt)) {
                 // BackStep: toward the camera without running steps back, facing where the camera looks (the game's
                 // own walk back), as in the original game; a reload or switch on the move steps back too. A counts
                 // only where it is the run (Run=Stock, the original buttons); otherwise it is the action button.
@@ -853,10 +1080,13 @@ static void ApplyControls(uint32_t padObj, uint32_t character) {
             lMag = stickMag > 1.0f ? 1.0f : stickMag;
             stickSet = true;
         }
-        // With the free camera the game's own mouse turning of the body is off (it steers Wesker's dash, and behind
-        // low cover it turns the crouch); outside the aim the mouse belongs to the camera, in the aim the game's
-        // mouse aim gets it (scaled by MouseSensitivity).
-        if (orbit && !dash && !lowCover) {
+        // With the free camera the game's own mouse turning of the body is off (it steers Wesker's dash); outside the
+        // aim the mouse belongs to the camera, in the aim the game's mouse aim gets it (scaled by MouseSensitivity).
+        // NOT in the scope (weapon camera) and NOT while aiming: `orbit` stays true while aiming, so this zeroed the
+        // mouse input during the aim as well and the aim camera could only move by the pad stick - the trace showed
+        // camPitch moving within +/-5 degrees while aiming, against +/-40 outside it.
+        const bool scopedNow = At<uint8_t>(character, ch::Scope) != 0;
+        if (orbit && !dash && !scopedNow && !aimHeld) {
             At<float>(padObj, 0x200) = 0.0f;
             At<float>(padObj, 0x204) = 0.0f;
         }
@@ -866,9 +1096,36 @@ static void ApplyControls(uint32_t padObj, uint32_t character) {
         } else if (orbit && !dash) {
             At<float>(padObj, 0x20C) = 0.0f;
             At<float>(padObj, 0x210) = 0.0f;
-            if (!lowCover) KbSyncTargetYaw(character);  // keep the game's own turn target on the facing the mod set
+            KbSyncTargetYaw(character);  // keep the game's own turn target on the facing the mod set
         }
-        if (snapNow && orbit) KbSyncTargetYaw(character);  // the game's mouse aim starts from the new facing
+        // The game keeps its own aim/turn target at ch+0x2A10 (KbSyncTargetYaw writes it from the quaternion and
+        // clears the 0x2A14 re-capture flag).  It has to be re-synced whenever the mod snaps the facing, and the
+        // old `&& orbit` guard skipped exactly the case that needed it: on an aim press the orbit is already off
+        // (the game's aim/scope camera owns the view), so the sniper scope kept aiming at the pre-snap target yaw.
+        if (snapNow) KbSyncTargetYaw(character);
+        // Scope look.  The sniper scope is drawn by the weapon camera (uCameraWep), which never goes through the mod's
+        // camera hook, so nothing the mod writes to the shot point or the aim point reaches it.  Its pitch comes from
+        // the character's aim state, so the mod integrates the mouse vertical itself and writes that state every frame
+        // while scoped: the scope then follows the view and still answers the mouse.  The horizontal mouse is left to
+        // the game (it turns the body), and only the vertical delta is consumed here so it is not applied twice.
+        if (At<uint8_t>(character, ch::Scope) != 0 && aimHeld && kbm && c.scopeLook) {
+            if (!JustActivated()) {
+                const float k = MouseUnitRadians() * c.mouseSensitivity;
+                const uint32_t inv = MouseInvert();
+                fc.pitch += kb.mouseY * k * c.mouseVertical * ((inv & 1) ? -1.0f : 1.0f);
+                if (fc.pitch > Rad(55.0f)) fc.pitch = Rad(55.0f);
+                if (fc.pitch < Rad(-40.0f)) fc.pitch = Rad(-40.0f);
+            }
+            At<float>(padObj, 0x210) = 0.0f;
+            At<float>(character, 0x2908) = fc.pitch;
+            At<float>(character, 0x290C) = fc.pitch;
+        }
+    }
+    // Feed the mouse vertical to the camera: with AimPitchFromMouse the mod drives the aim pitch from it and writes
+    // the result into the game every frame (see camera.cpp), so the aim stays where the camera points.
+    {
+        const float k = MouseUnitRadians() * c.mouseSensitivity * c.mouseVertical;
+        SetAimMouse(kb.mouseY, k, (MouseInvert() & 1) != 0);
     }
     S.wasAiming = aimHeld;
 
@@ -877,8 +1134,10 @@ static void ApplyControls(uint32_t padObj, uint32_t character) {
     // when a moving reload or switch hands over to the run.
     // Only where the character can run (standing, walking, running, turning, lowering the gun or knife): in cover A
     // is the reload, in Wesker's dash a turn.
+    const bool knifeStanceRun = (At<uint32_t>(character, ch::ActionId) >= aid::KnifeBegin &&
+                                 At<uint32_t>(character, ch::ActionId) <= aid::KnifeEnd);
     const bool runStance = handover || InLocomotion(character) || action == plact::Turn180 ||
-                           action == plact::ReadyEnd || idNow == aid::KnifeEnd;
+                           action == plact::ReadyEnd || idNow == aid::KnifeEnd || knifeStanceRun;
     const bool canRun = !aimHeld && !dash && S.quickTurnT < 0 && runStance &&
                         (handover || InLocomotion(character) || (S.reload == ReloadPhase::Idle && !reloadMove));
     if (runMode != RunMode::Stock) {
@@ -903,15 +1162,63 @@ static void ApplyControls(uint32_t padObj, uint32_t character) {
     // Each kind of walking has its own switch: some players like to walk with the knife and reload on the move
     // but shoot standing.
     const bool knifeState = actionId >= aid::KnifeBegin && actionId <= aid::KnifeAttack;
+    // The knife readies through its own states (0x22-0x27) and does not always set the aim rig.  Writing the aim point
+    // only when the id changed was one frame too late for the swing that started on that frame: the first swing of a
+    // hold went back to the character's front and the second one used the value written during the first (exactly the
+    // "first swing centres, second swing follows the camera" report).  The point is therefore refreshed EVERY frame
+    // while the knife is out, so it is already current when the swing picks its direction; the facing is turned to the
+    // camera only when the action id changes, so walking is not fought.
+    {
+        static uint32_t knifePrev[4] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
+        const int kSlot = At<uint8_t>(character, ch::NetSlot) & 3;
+        if (knifeState) {
+            float pos[3];
+            CharacterWorldPos(character, pos);
+            // Horizontal only: a knife swing is a melee action and has no useful vertical aim.
+            const float px = pos[0] + sinf(fc.yaw) * 4000.0f;
+            const float py = pos[1] + 90.0f;
+            const float pz = pos[2] + cosf(fc.yaw) * 4000.0f;
+            At<float>(character, 0x2870) = px;
+            At<float>(character, 0x2874) = py;
+            At<float>(character, 0x2878) = pz;
+            At<float>(character, 0x2700) = px;
+            At<float>(character, 0x2704) = py;
+            At<float>(character, 0x2708) = pz;
+            // The swing locks the facing, so it is written every frame while the swing runs (not only on the id change).
+            if (actionId == aid::KnifeAttack) { SetCharacterYaw(character, fc.yaw); KbSyncTargetYaw(character); }
+            if (knifePrev[kSlot] != actionId) {
+                SetCharacterYaw(character, fc.yaw);
+                KbSyncTargetYaw(character);
+                Log("knife: aim point and facing set for action %02X (yaw %.1f)", actionId, fc.yaw * 57.3f);
+            }
+        }
+        knifePrev[kSlot] = knifeState ? actionId : 0xFFFFFFFFu;
+    }
     // In a scope the left stick zooms (control types B and D): no walking there, unless ScopeWalk, where RB held
     // gives the stick back to the zoom (the legs stop meanwhile) and the keyboard zooms with the wheel as usual. In A
     // and C the left stick aims in the scope.
     const bool scope = At<uint8_t>(character, ch::Scope) != 0;
     const bool scopeWalk = scope && c.scopeWalk && (kbm || PadAimsWithRightStick(character));
     const bool zoomHold = scope && !kbm && (phys & partnerBit);
-    const bool walkAllowed = ((aiming && !knifeWins && c.gunWalk) || (knife && (!aiming || knifeWins) && c.knifeWalk) ||
+    // The RELOAD action itself is walkable, whoever started it: when a magazine runs out the game reloads by itself and
+    // the mod's own reload state (reloadMove) is never set, so the character stood still.  ReloadWalk is the switch.
+    // Measured action ids (from the mod's own timeline): 0x20 = item use / throw start, 0x85 = the throw itself.
+    const uint32_t aidThrowNow = At<uint32_t>(character, ch::ActionId);
+    // 0x20 is the WEAPON CHANGE.  Treating it as the thrown item forced P_RT through the switch, which is what made the
+    // character aim (and then reload) by itself right after changing weapons.  Only 0x85 is the throw.
+    const bool thrownItem = (aidThrowNow == 0x85);
+    static int throwWin[8] = {};
+    const int tw = slot & 7;
+    throwWin[tw] = 0;
+    const bool throwWindow = false;
+    // The direction is taken out at the source as well.  Clearing only the finished pad bits left the stick ANGLE and
+    // MAGNITUDE fields alive, which is why pressing anything but W still made the legs twitch: the game still saw a
+    // pushed stick.  Both the local copy and the pad fields are zeroed while the throw window is open.
+
+    const bool walkAllowed = ((action == plact::Reload && !aimHeld && c.reloadWalk) ||
+                              (aiming && !knifeWins && c.gunWalk) || (knife && (!aiming || knifeWins) && c.knifeWalk) ||
                               (reloadMove && c.reloadWalk) || (action == plact::ReadyEnd && c.gunWalk) ||
-                              (knifeState && !aimHeld && c.knifeWalk) || changeMove) &&
+                              (knifeState && c.knifeWalk) || changeMove) && !g_throwTail &&
                              !(switching && !c.switchWalk) && (!scope || (scopeWalk && !zoomHold)) &&
                              !(ride & 0x4000);  // riding: anchored
     if (kbm)
@@ -920,7 +1227,8 @@ static void ApplyControls(uint32_t padObj, uint32_t character) {
                                (!scope || scopeWalk),
                      false, walkAllowed, freeCam && fc.initialised);
     // A reload or switch on the move keeps the gait: running plays the weapon set's run clip at the run speed (with
-    // the hips' own bob), walking the walk at the normal walking speed.
+    // the hips' own bob), walking the walk at the normal walking speed.  The knife is deliberately NOT included:
+    // the .x build tried that and lost the omnidirectional movement the leg layer was giving during a slash.
     const bool keepGait = reloadMove || changeMove;
     const bool runIntent = runMode == RunMode::Stock ? (phys & (kbm ? runBit : P_A)) != 0 : wantRun;
     const bool runGait = keepGait && runIntent && stickMag >= 0.3f;
@@ -982,6 +1290,160 @@ static void ApplyControls(uint32_t padObj, uint32_t character) {
     // Rebuild the edge masks against what the game saw last frame (Old holds our previous output).
     const uint32_t old = At<uint32_t>(padObj, pp::Old);
     const uint32_t trg = ((out & ~old) | (forceTrg & out)) & ~dropTrg;
+    // CE dump of the stuck action (51 samples, byte-identical): the Fire object sits at phase 2 with every field frozen,
+    // i.e. the game is waiting for an input that never comes - after a shot released early, and when a magazine runs out.
+    // A single fire/reload press in that state lets the phase advance again (Fire -> ReadyEnd -> Wait).
+    {
+        static int stuckFrames[8] = {};
+        static int pushFrames[8] = {};
+        const int sl = slot & 7;
+        const uint32_t actSt = Readable((void*)(character + ch::CurAction), 4) ? At<uint32_t>(character, ch::CurAction) : 0;
+        // The knife attack shares the same vtable as the shot (KnifeAttack 0x27 reports 0x01044510), so the vtable alone
+        // was not enough: it caught the swing and overwrote its timer, which is what broke the quick slash.  The action id
+        // must be the shot (0x1E) as well.
+        const bool stuck = actSt && Readable((void*)actSt, 4) && At<uint32_t>(actSt, 0) == VaOf(0x01044510) &&
+                           At<uint32_t>(character, ch::ActionId) == 0x1E &&
+                           Readable((void*)(actSt + 0x14), 1) && At<uint8_t>(actSt, 0x14) == 2 && !aimHeld;
+        if (stuck) {
+            // EVERY FRAME, not once per 0.5 s: the game accumulates [object+0x20] after this point, so a single write is
+            // overwritten before the comparison runs.  Keeping it above any threshold every frame is what actually ends
+            // the wait.  +0x24 is written too in case the threshold is taken from the object instead of the stack.
+            At<float>(actSt, 0x20) = 999.0f;
+            At<float>(actSt, 0x24) = 999.0f;
+            if (++stuckFrames[sl] > 30) {          // ~0.5 s
+                // The CE dump showed the Fire object frozen at phase 2 with every field identical: its update is not
+                // running, so no input can move it (a pushed X did nothing).  Advance its own phase byte instead, which
+                // is what the action does when it does run (0 -> 0xA -> 0x14).
+                // Static analysis of the phase-2 block (0xC8A4A4): it waits on the timer at [object+0x20] against two
+                // thresholds (comiss + jb) and only then sets the state bits and drops to the exit.  The CE samples showed
+                // that timer frozen at 65.0, so the comparison never passes.  Pushing it over the threshold ends the
+                // wait without changing the state machine's path.
+                // Record what the phase-2 wait actually holds: the accumulator it compares, and the two floats that
+                // live next to it in the object.  One line per stuck episode.
+                Log("fire: timer=%.2f f1c=%.3f f24=%.3f phase=%d", At<float>(actSt, 0x20), At<float>(actSt, 0x1C),
+                    At<float>(actSt, 0x24), (int)At<uint8_t>(actSt, 0x14));
+                if (At<float>(actSt, 0x20) < 900.0f) At<float>(actSt, 0x20) = 999.0f;
+                stuckFrames[sl] = 0;
+                Log("fire stuck: advanced the Fire phase byte to %d", (int)At<uint8_t>(actSt, 0x14));
+            }
+        } else {
+            stuckFrames[sl] = 0;
+        }
+        (void)pushFrames;
+    }
+    if (busyAction) out &= ~(P_LT | P_RT | P_LB);
+    {
+        // While the knife is out the movement goes through the "the game walks straight ahead, the mod steers" path, which
+        // always leaves the direction at forward.  The direction bits are therefore written here from the stick, relative
+        // to the camera, so a side step or a back step works during the swing too.
+        const uint32_t aidK2 = At<uint32_t>(character, ch::ActionId);
+        if (aidK2 >= aid::KnifeBegin && aidK2 <= aid::KnifeAttack) {
+            const float mag = sqrtf(st.lx * st.lx + st.ly * st.ly);
+            if (mag >= 0.3f && fc.initialised) {
+                uint32_t bits = 0;
+                SetStickDirBits(bits, atan2f(-st.lx, st.ly) * 57.29578f, mag > 1.0f ? 1.0f : mag);
+                out = (out & ~(P_LS_DIRS | P_UP | P_DOWN | P_LEFT | P_RIGHT)) | bits;
+            }
+        }
+    }
+    {
+        // The thrown item: the twitch in the recovery comes from the leg layer and the direction bits fighting the
+        // animation.  Both are withheld until the throw action is really over.
+        static int throwTail[8] = {};
+        const int tq = slot & 7;
+        const uint32_t vtT = Readable((void*)(character + ch::CurAction), 4) ? At<uint32_t>(character + ch::CurAction, 0) : 0;
+        if (vtT == VaOf(0x0104456C) || vtT == VaOf(0x01044F38)) throwTail[tq] = 8;
+        else if (throwTail[tq] > 0) { --throwTail[tq]; }
+        g_throwTail = (throwTail[tq] > 0);
+        // Releasing the aim during the throw recovery is what makes it twitch; holding the button through the recovery
+        // does not.  So the release is deferred: while the thrown-item action plays the aim is kept, and it is let go on
+        // the first frame after the action is over.
+        static bool releasePending[8] = {};
+        if (vtT == VaOf(0x0104456C) || vtT == VaOf(0x01044F38)) { releasePending[tq] = true; }
+        else if (releasePending[tq]) { releasePending[tq] = false; out &= ~P_RT; }
+    }
+    {
+        // Identify the climbing state: when the aim key goes down, record the action and the ride/climb bits once.
+        static bool prevAim[8] = {};
+        const int aq = slot & 7;
+        const bool aimNow = (phys & P_LT) != 0;
+        if (aimNow && !prevAim[aq])
+            Log("aim down: aid=%02X ride=%08X 2D98=%02X", At<uint32_t>(character, ch::ActionId),
+                At<uint32_t>(character, 0x2D8C), At<uint8_t>(character, 0x2D98));
+        prevAim[aq] = aimNow;
+    }
+    {
+        // Diagnostic: what does the knife state actually write?  Prints the stick, the camera state and the final pad.
+        static int dbg[8] = {};
+        const int dq = slot & 7;
+        const uint32_t aidD = At<uint32_t>(character, ch::ActionId);
+        if (aidD >= aid::KnifeBegin && aidD <= aid::KnifeAttack) {
+            if ((++dbg[dq] % 15) == 0)
+                Log("knifeMove: aid=%02X lx=%.2f ly=%.2f fc=%d mag=%.2f out=%08X dirs=%04X", aidD, st.lx, st.ly,
+                    fc.initialised ? 1 : 0, sqrtf(st.lx * st.lx + st.ly * st.ly), out, out & 0xFFFF);
+        } else dbg[dq] = 0;
+    }
+    {
+        static uint32_t lastT[8] = {};
+        static int kdbg[8] = {};
+        const int dq2 = slot & 7;
+        const uint32_t vtD = Readable((void*)(character + ch::CurAction), 4) ? At<uint32_t>(character + ch::CurAction, 0) : 0;
+        if (vtD != lastT[dq2]) { lastT[dq2] = vtD; Log("act vt=%08X aid=%02X aimHeld=%d throwAim=%d", vtD, At<uint32_t>(character, ch::ActionId), (int)aimHeld, (int)g_throwAimHeld); }
+        const uint32_t aidD2 = At<uint32_t>(character, ch::ActionId);
+        if (aidD2 >= aid::KnifeBegin && aidD2 <= aid::KnifeAttack && (++kdbg[dq2] % 20) == 0)
+            Log("knifeState: aid=%02X stick=%.2f runGait=%d pace=%.2f", aidD2,
+                sqrtf(st.lx * st.lx + st.ly * st.ly), (int)runGait, pace);
+    }
+    // Thrown item: movement is blocked and the aim is held until the action is over, exactly as the original game does.
+    // Releasing here is what produced the twitch, and letting the legs run is what produced the forward drift.
+    if (thrownItem) {
+        out &= ~(P_LS_DIRS | P_UP | P_DOWN | P_LEFT | P_RIGHT);
+    }
+    // Eight more frames after the thrown-item action is gone: the recovery pose is still playing, and taking input there
+    // is what made the body twitch.  Nothing is fed through in that short window.
+    {
+        static int tail[8] = {};
+        const int tq2 = slot & 7;
+        // The recovery pose is still playing for about half a second; accepting input there is what twitches the body.
+        // The window is widened and the aim is kept through it, so the character stays in one pose until the game hands
+        // control back on its own.
+        if (thrownItem) tail[tq2] = 30;
+        else if (tail[tq2] > 0) {
+            --tail[tq2];
+            out &= ~(P_LS_DIRS | P_UP | P_DOWN | P_LEFT | P_RIGHT);
+        }
+    }
+    // Engine movement takeover (experimental, [Movement] EngineMove=1).  The native locomotion is suppressed while a
+    // slash, an item use or a throw plays, so the actor is moved here instead, in the camera's direction.
+    if (EngineMovementActive() && freeCam && fc.initialised && stickMag >= 0.3f) {
+        const uint32_t aidE = At<uint32_t>(character, ch::ActionId);
+        // Every action where the engine suppresses locomotion: the slash, the whole fire action (which also carries the
+        // throw) and the item group.  The item ids differ per build (0x59-0x60, 0x5F-0x63 have all been observed for the
+        // spray), so the whole group is covered instead of one id.
+        const bool lockedMove = (aidE == aid::KnifeAttack) || (aidE == 0x1E) || (aidE >= 0x59 && aidE <= 0x68);
+        if (lockedMove) {
+            const float yawE = StickWorldYaw(fc, st.lx, st.ly);
+            static int loggedE = 0;
+            // Walk pace by default; the run input (or a run-mode toggle) doubles it, so the sword/spray/throw move
+            // like the rest of the movement instead of creeping.
+            const float speedE = (runIntent || (phys & runBit)) ? 430.0f : 220.0f;
+            const bool moved = EngineMoveStep(character, yawE, speedE, (float)dt);
+            if (moved) {
+                if (loggedE < 6) {
+                    ++loggedE;
+                    const uint32_t po = character + ch::Pos;
+                    Log("enginemove: aid=%02X yaw=%.1f dt=%.3f pos=%.1f,%.1f", aidE, yawE * 57.3f, (float)dt,
+                        At<float>(po, 0), At<float>(po, 8));
+                }
+                static int everyE = 0;
+                if ((++everyE % 25) == 1) {
+                    const uint32_t po = character + ch::Pos;
+                    Log("enginemove: aid=%02X pos=%.1f,%.1f", aidE, At<float>(po, 0), At<float>(po, 8));
+                }
+            }
+        }
+    }
+    // Interactions, melee, vaults and climbs: the aim key must do nothing at all.
     on = out;
     At<uint32_t>(padObj, pp::Trg) = trg;
     At<uint32_t>(padObj, pp::Rel) = old & ~out;
@@ -993,7 +1455,7 @@ static void ApplyControls(uint32_t padObj, uint32_t character) {
     Bridge()->reserved[3] = character;
     Bridge()->reserved[4] = (uint32_t)S.reload | (reloadMove ? 0x10 : 0) | (S.aimFast ? 0x100 : 0) |
                             (aimWalking ? 0x1000 : 0) | (S.runToggled ? 0x10000 : 0);
-    Bridge()->reserved[31] = (dash ? 1u : 0u) | (knifeWins ? 2u : 0u) | (lowCover ? 4u : 0u) |
+    Bridge()->reserved[31] = (dash ? 1u : 0u) | (knifeWins ? 2u : 0u) |
                              (S.snapPending ? 8u : 0u) | (S.runSig == P_L3 ? 0x10u : 0u) | (S.tauntL3 ? 0x20u : 0u) |
                              (S.bHeldFromTurn ? 0x40u : 0u) | (snapNow ? 0x80u : 0u);
 #endif
@@ -1091,13 +1553,16 @@ static void InstallRawHoldPatches() {
 static CRITICAL_SECTION g_padLock;
 static volatile LONG g_padLockInit = 0;
 
-static void __fastcall HookPlayerPadUpdate(uint32_t self, void* edx) {
-    oPlayerPadUpdate(self, edx);
+void InitPadLock() {
     if (InterlockedCompareExchange(&g_padLockInit, 1, 0) == 0) {
         InitializeCriticalSection(&g_padLock);
         InterlockedExchange(&g_padLockInit, 2);
     }
-    while (g_padLockInit != 2) Sleep(0);
+}
+
+static void __fastcall HookPlayerPadUpdate(uint32_t self, void* edx) {
+    if (g_padLockInit != 2) InitPadLock();
+    oPlayerPadUpdate(self, edx);
     struct Lock {
         Lock() { EnterCriticalSection(&g_padLock); }
         ~Lock() { LeaveCriticalSection(&g_padLock); }
@@ -1106,9 +1571,13 @@ static void __fastcall HookPlayerPadUpdate(uint32_t self, void* edx) {
     UpdateColorFilter();
     uint32_t character = 0;
     if (IsLocalPlayerPad(self, &character)) {
-        InventoryPadUpdated(self);
-        InstallRawHoldPatches();
-        if (Cfg().enabled) {
+        const Config& cfg = Cfg();
+        // Inventory pad rewrite and raw-hold patches are only needed in full control modes.
+        if (cfg.enabled && !cfg.meleeOnly) {
+            InventoryPadUpdated(self);
+            InstallRawHoldPatches();
+        }
+        if (cfg.enabled) {
             ApplyControls(self, character);
 #if RE3C_DEV
             if (DevMode()) DevExperiments(character);
@@ -1116,7 +1585,8 @@ static void __fastcall HookPlayerPadUpdate(uint32_t self, void* edx) {
         } else {
             AimWalkUpdate(character, 0.0f, 0.0f, false, 0.0f, 0.0f);  // turned off mid-walk: the legs stop
         }
-        AimWalkRemoteTick();  // partner copies whose packets stopped (left, Sync=0, no pad here) stop walking
+        // Remote leg-layer smoothing is free when Sync is off / no remote layers are live.
+        if (cfg.coopSync) AimWalkRemoteTick();
     }
 }
 
@@ -1174,9 +1644,36 @@ static bool __fastcall HookActionCheck(uint32_t self, void* edx, uint32_t pad, u
 }
 
 // ------------------------------------------------------------------------------------------------ install
+// Signature check for a code address that also accepts an execute-only page.
+// SafeEqual() goes through Readable(), which requires a READ protection bit; a
+// page mapped PAGE_EXECUTE only (no read) then compares as a mismatch even when
+// the bytes are exactly right.  ActionSlot::Check was reported as a mismatch at
+// 0x766F00 by the 01:18 run although the dumped image has the expected
+// 53 56 8B F1 8B 46 0C 32 DB there, so that is the most likely cause.
+static bool CodeMatches(uint32_t addr, const BYTE* sig, size_t n) {
+    MEMORY_BASIC_INFORMATION mbi;
+    if (!VirtualQuery((void*)addr, &mbi, sizeof(mbi))) return false;
+    if (mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS))) return false;
+    const DWORD ok = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE | PAGE_EXECUTE_READ |
+                     PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    if (!(mbi.Protect & ok)) return false;
+    if ((const BYTE*)addr + n > (const BYTE*)mbi.BaseAddress + mbi.RegionSize) return false;
+    if (memcmp((void*)addr, sig, n) == 0) return true;
+    // Another component (RE5Fix's dinput8.dll) may already have hooked the entry.  A jump there is still hookable:
+    // MinHook chains on top of it.  Without this the ActionSlot hook was skipped in every session.
+    const uint8_t b0 = *(const uint8_t*)addr;
+    return b0 == 0xE9 || b0 == 0xEB;
+}
+
 static bool HookAt(uint32_t addr, const BYTE* expect, size_t n, void* detour, void** orig, const char* name) {
-    if (!SafeEqual((void*)addr, expect, n)) {
-        Log("hook %s: signature mismatch at %08x - unsupported game version?", name, addr);
+    if (!CodeMatches(addr, expect, n)) {
+        if (Readable((void*)addr, 8)) {
+            const uint8_t* b = (const uint8_t*)addr;
+            Log("hook %s: signature mismatch at %08x (bytes %02X %02X %02X %02X %02X %02X %02X %02X)",
+                name, addr, b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]);
+        } else {
+            Log("hook %s: signature mismatch at %08x (page not readable)", name, addr);
+        }
         return false;
     }
     if (MH_CreateHook((void*)addr, detour, orig) != MH_OK || MH_QueueEnableHook((void*)addr) != MH_OK) {
@@ -1196,6 +1693,7 @@ void InitGameHooks() {
     InitMeleeHooks();
     InitBalanceHooks();
     InitKeyboardHooks();
+  InitMovementHooks();
     static const BYTE sigPad[] = {0x83, 0xEC, 0x28, 0x0F, 0x57, 0xC0, 0x53, 0x56, 0x8B, 0xF1};
     bool ok = HookAt(kFnPlayerPadUpdate, sigPad, sizeof(sigPad), (void*)HookPlayerPadUpdate,
                      (void**)&oPlayerPadUpdate, "PlayerPad::Update");

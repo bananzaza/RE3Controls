@@ -3,7 +3,7 @@
 
 // Developer build (build.sh dev): dev server, shared-memory bridge with a virtual pad, screenshots. Release builds
 // leave all of it out.
-#define RE3C_VERSION_STR "1.9"
+#define RE3C_VERSION_STR "1.9.5mod"
 
 #ifndef RE3C_DEV
 #define RE3C_DEV 0
@@ -87,17 +87,84 @@ struct BridgeShared {
 void Log(const char* fmt, ...);
 
 // True if [p, p+n) is committed readable memory.
+// Hot path: called hundreds of times per frame. VirtualQuery is a kernel transition, so recent positive results are
+// cached. Entries expire after a few milliseconds: memory is freed and committed all the time (chapter restarts,
+// level loads), so a region that was readable a moment ago may be gone now, and a stale "yes" means reading freed
+// memory. Negative results are never cached (the same region can be committed later). The table is shared by the
+// game's worker threads (split screen), hence the spin lock around it.
 inline bool Readable(const void* p, size_t n) {
+    if (!p || n == 0) return false;
+    const uintptr_t start = (uintptr_t)p;
+    const uintptr_t end = start + n;
+    if (end < start) return false;
+
+    struct Region {
+        uintptr_t base, end;
+        DWORD tick;
+    };
+    static Region cache[16];
+    static unsigned cache_i = 0;
+    static volatile LONG lock = 0;
+    const DWORD now = GetTickCount();
+
+    while (InterlockedExchange(&lock, 1)) YieldProcessor();
+    for (unsigned i = 0; i < 16; ++i) {
+        const Region& r = cache[i];
+        if (r.end == 0 || (DWORD)(now - r.tick) > 32) continue;
+        if (start >= r.base && end <= r.end) {
+            InterlockedExchange(&lock, 0);
+            return true;
+        }
+    }
+    InterlockedExchange(&lock, 0);
+
     MEMORY_BASIC_INFORMATION mbi;
-    if (!p || !VirtualQuery(p, &mbi, sizeof(mbi))) return false;
+    if (!VirtualQuery(p, &mbi, sizeof(mbi))) return false;
     if (mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS))) return false;
-    const DWORD readable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ |
+    // PAGE_EXECUTE is included on purpose: on x86 a user-mode execute-only page is still readable, and the game maps
+    // some code pages that way.  Without it every SafeEqual() signature check on such a page failed and the hooks
+    // behind it were skipped (one run showed camera ctrl, bind-slot, camera aim ray, pad aim and the reticle all
+    // failing while the neighbouring functions hooked fine).
+    const DWORD readable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE | PAGE_EXECUTE_READ |
                            PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
     if (!(mbi.Protect & readable)) return false;
-    return (const BYTE*)p + n <= (const BYTE*)mbi.BaseAddress + mbi.RegionSize;
+    const uintptr_t rbase = (uintptr_t)mbi.BaseAddress;
+    const uintptr_t rend = rbase + mbi.RegionSize;
+
+    while (InterlockedExchange(&lock, 1)) YieldProcessor();
+    cache[cache_i++ & 15] = {rbase, rend, now};
+    InterlockedExchange(&lock, 0);
+    return end <= rend;
 }
 inline bool SafeEqual(const void* p, const void* sig, size_t n) {
     return Readable(p, n) && memcmp(p, sig, n) == 0;
+}
+// Hook-site check that tolerates an entry another component already hooked (RE5Fix's dinput8.dll patches code long
+// before this mod runs).  A jump opcode at the entry means someone else owns the prologue; MinHook can still chain a
+// detour on top of it, and skipping the hook silently degraded whole features (bind-slot = the leg layer, pad aim).
+inline bool HookSite(const void* p, const void* sig, size_t n) {
+    if (SafeEqual(p, sig, n)) return true;
+    if (!Readable(p, 1)) {
+        Log("hook site %08x: not readable", (unsigned)(uintptr_t)p);
+        return false;
+    }
+    const uint8_t* b = (const uint8_t*)p;
+    if (b[0] == 0xE9 || b[0] == 0xEB) return true;  // someone else hooked it: chain on top
+    // Not our code at all: print what is there so the patch can be adapted instead of guessed.  The bytes before the
+    // first mismatch are printed as well, because RE5Fix often leaves the prologue intact and changes a later byte.
+    char want[3 * 16 + 1] = {}, got[3 * 16 + 1] = {};
+    const size_t shown = n < 16 ? n : 16;
+    for (size_t i = 0; i < shown; ++i) {
+        const char* hex = "0123456789ABCDEF";
+        want[i * 3] = hex[((const uint8_t*)sig)[i] >> 4];
+        want[i * 3 + 1] = hex[((const uint8_t*)sig)[i] & 15];
+        want[i * 3 + 2] = ' ';
+        got[i * 3] = hex[b[i] >> 4];
+        got[i * 3 + 1] = hex[b[i] & 15];
+        got[i * 3 + 2] = ' ';
+    }
+    Log("hook site %08x differs: want %s / have %s", (unsigned)(uintptr_t)p, want, got);
+    return false;
 }
 BridgeShared* Bridge();
 void InitBridge();

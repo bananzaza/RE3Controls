@@ -50,6 +50,9 @@ struct LegLayer {
     uint32_t ch = 0;
     bool active = false;
     uint16_t clip = 0xFFFF;
+    uint32_t goodBank = 0;   // last motion set in which the strafe/back clips existed
+    uint32_t bankFixStance = 0xFFFFFFFF;  // stance -> motion set substitution that was found to work
+    uint32_t bankFix = 0;
     uint16_t savedMotion = 0xFFFF;
     float savedFrame = 0;
     float rate = 1.0f;
@@ -81,6 +84,7 @@ struct LegLayer {
     bool faceHeld = false;  // slot 6 borrowed; the face clip the game asked for meanwhile goes back at the end
     bool runGait = false;   // the run clip plays (with hysteresis against the walk blend)
     uint32_t noBlendBank = 0xFFFFFFFF;  // weapon set without the strafe/back clips: one clip only
+    uint8_t walkBank = 0;   // walk bank before a reload, kept for characters of kind 4 and up (see AimWalkUpdate)
     double startTime = 0;   // when the layer became active
     // The game's own last request for the stance slots 3-5 while the layer replaced or skipped it (clip, speed),
     // put back when the layer ends if the slot still holds the replacement.
@@ -122,10 +126,23 @@ static float Wrap(float a) {
     return a;
 }
 
+static void MaskSlot(const LegLayer& L, uint32_t slot);  // applied from SetMotion, defined further down
+
 static bool SetMotion(uint32_t ch, uint32_t slot, uint32_t no, float inter, float start = 0.0f, float speed = 1.0f) {
     g_ownCall = true;
     bool r = (oSetMotion ? oSetMotion : (PFN_SetMotion)kFnSetMotion)(ch, nullptr, slot, no, inter, start, speed, 0);
     g_ownCall = false;
+    // Mask the freshly bound clip right away.  The bind callback (0xB798B0) does this before the frame is evaluated,
+    // but on machines where RE5Fix patched that entry the hook cannot install, and then the first frame of every new
+    // clip is full-body - the character jumps for one frame exactly when it starts moving (reported in the scope).
+    if (r && (slot == kLegSlot || slot == kSlotFB)) {
+        for (auto& L : g_layers) {
+            if (L.active && L.ch == ch && L.jointCount) {
+                MaskSlot(L, slot);
+                break;
+            }
+        }
+    }
     return r;
 }
 
@@ -177,6 +194,7 @@ struct WalkSample {
     uint32_t ch = 0;
     float phase = 0;
     double time = 0;
+    uint8_t bank = 0;  // motion bank of that clip
 };
 static WalkSample g_walk[4];  // one per local player (split screen)
 
@@ -444,29 +462,43 @@ typedef void(__fastcall* PFN_MotionUpdate)(uint32_t model, void* edx);
 static PFN_MotionUpdate oMotionUpdate = nullptr;
 static const uint32_t kFnMotionUpdateThunk = 0x008305A0;  // jmp 0x59D0B0
 
+static bool AnyLayerBusy() {
+    for (const auto& L : g_layers)
+        if (L.active || L.k > 0.0f || L.saveValid || L.remote) return true;
+    return false;
+}
+
 static void __fastcall HookMotionUpdate(uint32_t model, void* edx) {
-    for (auto& L : g_layers) {
-        if (L.ch != model || !L.saveValid) continue;
-        L.saveValid = false;
-        const uint32_t joints = At<uint32_t>(model, 0x318);
-        const uint32_t count = At<uint32_t>(model, 0x314);
-        if (joints != L.saveJoints || L.pelvis < 0 || (count > 256 ? 256 : count) != L.jointCount ||
-            !Readable((void*)joints, L.jointCount * 0x90) || At<uint8_t>(joints, L.pelvis * 0x90 + 7) != 0x0F ||
-            (L.spine1 >= 0 && (At<uint8_t>(joints, L.spine1 * 0x90 + 7) != 0x01 ||
-                               At<uint8_t>(joints, L.spine2 * 0x90 + 7) != 0x02)) ||
-            !IsPlayerCharacter(model) || (DevMode() && (Bridge()->reserved[24] & 256)))
+    // Runs on every model motion update. Skip the layer scan when nothing is walking.
+    if (g_restoreHook && AnyLayerBusy()) {
+        for (auto& L : g_layers) {
+            if (L.ch != model || !L.saveValid) continue;
+            L.saveValid = false;
+            const uint32_t joints = At<uint32_t>(model, 0x318);
+            const uint32_t count = At<uint32_t>(model, 0x314);
+            if (joints != L.saveJoints || L.pelvis < 0 || (count > 256 ? 256 : count) != L.jointCount ||
+                !Readable((void*)joints, L.jointCount * 0x90) || At<uint8_t>(joints, L.pelvis * 0x90 + 7) != 0x0F ||
+                (L.spine1 >= 0 && (At<uint8_t>(joints, L.spine1 * 0x90 + 7) != 0x01 ||
+                                   At<uint8_t>(joints, L.spine2 * 0x90 + 7) != 0x02)) ||
+                !IsPlayerCharacter(model) || (DevMode() && (Bridge()->reserved[24] & 256)))
+                break;
+            memcpy((void*)(joints + L.pelvis * 0x90 + 0x20), L.savePelvis, 16);
+            if (L.spine1 >= 0) {
+                memcpy((void*)(joints + L.spine1 * 0x90 + 0x20), L.saveS1, 16);
+                memcpy((void*)(joints + L.spine2 * 0x90 + 0x20), L.saveS2, 16);
+            }
             break;
-        memcpy((void*)(joints + L.pelvis * 0x90 + 0x20), L.savePelvis, 16);
-        if (L.spine1 >= 0) {
-            memcpy((void*)(joints + L.spine1 * 0x90 + 0x20), L.saveS1, 16);
-            memcpy((void*)(joints + L.spine2 * 0x90 + 0x20), L.saveS2, 16);
         }
-        break;
     }
     oMotionUpdate(model, edx);
 }
 
 static void __fastcall HookBlend(uint32_t model, void* edx) {
+    // Runs on every model blend in the game. Bail out before scanning when no leg layer is live.
+    if (!AnyLayerBusy()) {
+        oBlend(model, edx);
+        return;
+    }
     LegLayer* layer = nullptr;
     uint32_t shield[2] = {};  // slots 7 and 6 of a walking layer, marked as fading for this blend (see below)
     float shieldFade[2] = {}, shieldFactor[2] = {};
@@ -722,6 +754,22 @@ static bool Switching(uint32_t ch) {
     return vt == plact::WeaponChange || vt == plact::WeaponChangeReady;
 }
 
+static bool Reloading(uint32_t ch) {
+    const uint32_t act = Readable((void*)(ch + ch::CurAction), 4) ? At<uint32_t>(ch, ch::CurAction) : 0;
+    return Readable((void*)act, 4) && At<uint32_t>(act, 0) == plact::Reload;
+}
+
+// Character kind from the game's function at 0x715B90 (the same as IsWesker in game.cpp). -1 without the expected code.
+static int CharacterKind(uint32_t ch) {
+    static int ok = 0;
+    if (!ok) {
+        static const BYTE sig[] = {0x8B, 0x4C, 0x24, 0x04, 0x8B, 0x01, 0x8B, 0x50, 0x10,
+                                   0xFF, 0xD2, 0x8B, 0x40, 0x20, 0xC1, 0xE8, 0x08};
+        ok = SafeEqual((void*)0x00715B90, sig, sizeof(sig)) ? 1 : -1;
+    }
+    return ok > 0 ? (int)((uint32_t(__cdecl*)(uint32_t))0x00715B90)(ch) : -1;
+}
+
 bool LegLayerState(uint32_t ch) { return AimWalkState(ch) || Switching(ch); }
 
 static void StopLayer(LegLayer& L) {
@@ -920,6 +968,7 @@ bool AimWalkUpdate(uint32_t ch, float stickX, float stickY, bool walkAllowed, fl
             WalkSample* w = WalkFor(ch, true);
             w->phase = Frac(At<float>(s0, 0x18) / At<float>(s0, 0x1C) - LeftStrike(ch, 0, kStrike[0]));
             w->time = Now();
+            w->bank = (uint8_t)(m0 >> 8);
         }
     }
     // preStart: the aim, the knife or a reload was asked for this frame while walking; the game starts that action
@@ -980,7 +1029,27 @@ bool AimWalkUpdate(uint32_t ch, float stickX, float stickY, bool walkAllowed, fl
     // it is swapped into bank 5 halfway) or bank 1 (grenades, cover): the walk of the weapon in hand, which the engine
     // rebinds to the new one at the swap.
     const uint16_t stance = At<uint16_t>(SlotObj(ch, 0), 4);
-    const uint32_t bank = stance == 0xFFFF || Switching(ch) ? 0x05 : (stance >> 8);
+    uint32_t bank = stance == 0xFFFF || Switching(ch) ? 0x05 : (stance >> 8);
+    // A stance whose motion set has no locomotion clips (the game switches to a knife-only set for some characters) is
+    // substituted once, not retried every frame: retrying is what made the run restart (the stutter).
+    if (L->bankFixStance == stance && L->bankFix) bank = L->bankFix;
+    // Characters of kind 4 and up: during a reload the walk bank stays the one used before the reload.
+    if (CharacterKind(ch) >= 4) {
+        if (Reloading(ch)) {
+            const WalkSample* ws = WalkFor(ch, false);
+            const uint32_t keep = L->walkBank ? L->walkBank : (ws ? ws->bank : 0);
+            if (keep) bank = keep;
+        } else if (stance != 0xFFFF && !Switching(ch)) {
+            L->walkBank = (uint8_t)bank;
+        }
+    }
+    // With the knife out the game swaps the motion set to the knife's own bank, which has no strafe/back clips for some
+    // characters (Barry in Mercenaries Reunion), so the blend failed and the run restarted every frame.  The walk bank
+    // that was in use before the knife is kept instead.
+    {
+        const uint32_t aidN = At<uint32_t>(ch, ch::ActionId);
+        if (aidN >= 0x22 && aidN <= 0x24 && L->walkBank) bank = L->walkBank;
+    }
     const bool runGait = run && L->axis == 0 && fabsf(delta) < (L->runGait ? 0.5f : 0.3f);
     L->runGait = runGait;
     uint16_t want = (uint16_t)((bank << 8) | (runGait ? 0x04 : kAxisClip[L->axis]));
@@ -1013,11 +1082,42 @@ bool AimWalkUpdate(uint32_t ch, float stickX, float stickY, bool walkAllowed, fl
         const uint16_t fb = (uint16_t)((bank << 8) | (L->back ? 0x07 : 0x01));
         const uint16_t lr = (uint16_t)((bank << 8) | (L->right ? 0x0D : 0x0C));
         if (!PlayBlend(*L, fb, lr, w, rate)) {
-            L->noBlendBank = bank;  // this weapon set has no strafe/back walk: one clip from the next frame on
-            return false;
+            // This character/stage has no strafe or back clips in this motion set (Barry's knife set is one example).
+            // Retry with the last set that did have them, instead of dropping the layer for this frame - dropping it is
+            // what restarted the run every frame and produced the stutter.
+            const uint32_t fallback = L->goodBank ? L->goodBank : (uint32_t)L->walkBank;
+            const bool ok = fallback && fallback != bank &&
+                            PlayBlend(*L, (uint16_t)((fallback << 8) | (fb & 0xFF)),
+                                      (uint16_t)((fallback << 8) | (lr & 0xFF)), w, rate);
+            if (ok) { L->bankFixStance = stance; L->bankFix = fallback; }
+            L->noBlendBank = bank;  // do not try this set again for this stance
+            if (!ok) return false;
+        } else {
+            L->goodBank = bank;
         }
     } else if (!PlayLayer(*L, want, rate)) {
-        return false;
+        // The run clip (bank | 0x04) does not exist in this motion set either - with the knife out the game switches to
+        // a set that only holds the knife stances, so running with the knife dropped the layer every frame (the stutter).
+        // The motion set derived from the stance does not necessarily hold this character's locomotion clips (the game
+        // switches the whole set while the knife is out).  The set the game itself uses when the character walks is the
+        // reliable one, so it is tried first, then the last good set, then the walk bank.
+        const WalkSample* wsFb = WalkFor(ch, false);
+        const uint32_t cand[3] = { (uint32_t)(wsFb ? wsFb->bank : 0), L->goodBank, (uint32_t)L->walkBank };
+        bool placed = false;
+        for (int ci = 0; ci < 3 && !placed; ++ci) {
+            const uint32_t b2 = cand[ci];
+            if (!b2 || b2 == bank || b2 == cand[(ci + 1) % 3]) continue;
+            if (PlayLayer(*L, (uint16_t)((b2 << 8) | (want & 0xFF)), rate)) {
+                L->goodBank = b2;
+                L->noBlendBank = bank;
+                L->bankFixStance = stance;
+                L->bankFix = b2;
+                placed = true;
+            }
+        }
+        if (!placed) return false;
+    } else {
+        L->goodBank = bank;
     }
 
     // One clip (the run): the legs turn toward the real direction with a critically damped spring (exact step, so
@@ -1174,7 +1274,7 @@ void InitAimWalkHooks() {
         MH_QueueEnableHook((void*)kFnModelBlend) == MH_OK)
         Log("hook uModel blend at %08x", kFnModelBlend);
     static const BYTE sigBind[] = {0x83, 0x7C, 0x24, 0x04, 0x07, 0x56, 0x8B, 0xF1, 0x0F, 0x85};
-    if (SafeEqual((void*)kFnPlayerBindSlot, sigBind, sizeof(sigBind)) &&
+    if (HookSite((void*)kFnPlayerBindSlot, sigBind, sizeof(sigBind)) &&
         MH_CreateHook((void*)kFnPlayerBindSlot, (void*)HookBindSlot, (void**)&oBindSlot) == MH_OK &&
         MH_QueueEnableHook((void*)kFnPlayerBindSlot) == MH_OK)
         Log("hook player bind-slot callback at %08x", kFnPlayerBindSlot);

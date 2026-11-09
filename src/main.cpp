@@ -119,6 +119,8 @@ static bool WaitFor(bool (*ready)(), DWORD timeoutMs) {
 }
 
 void InitGameHooks();
+void InitPadLock();
+void InitGameHooks();
 void RedirectGameXInputImports();
 void InitDevServer();
 void DevPatchWindowActive();
@@ -156,6 +158,7 @@ static DWORD WINAPI InitThread(LPVOID) {
     DevPatchWindowActive();
     if (DevMode()) InitD3D9Hooks();  // back-buffer screenshots for the dev tools only
 #endif
+    InitPadLock();
     InitGameHooks();
     return 0;
 }

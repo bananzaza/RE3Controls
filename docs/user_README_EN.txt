@@ -1,5 +1,5 @@
-RE3Controls for Resident Evil 5 - Resident Evil 3 (2020) style controls          v1.9
-=================================================================================
+RE3Controls for Resident Evil 5 - Resident Evil 3 (2020) style controls
+=======================================================================
 
 What the mod does
 -----------------
@@ -13,7 +13,7 @@ What the mod does
   The legs walk while the upper body keeps aiming, with footstep sounds; you can shoot and reload on
   the move. The forward/back and sideways walks are blended by the direction, so the legs change
   direction smoothly; the spine takes up the turn of the hips, so the waist does not bend at one point.
-  Two paces: normal and fast (click L3 while aiming). Aiming straight out of a run does not stop
+  Two paces: normal and fast (press RB while aiming). Aiming straight out of a run does not stop
   you, you carry on at the fast pace. Walking with a gun, with the knife and while reloading can be
   switched on and off separately. Looking through a scope (sniper rifles, rocket launchers) you stand
   still by default, as in the original game: the left stick zooms there (control type D). With
@@ -30,7 +30,7 @@ What the mod does
   moving only the arms (with the mouse too: the body turns with the aim, no trembling), and the aim
   camera keeps up with the aim instead of trailing behind it. Gamepad aim speed can be raised or
   lowered separately for both axes.
-- Shoulder swap: RB while aiming moves the camera to the other shoulder (and back).
+- Shoulder swap: L3 while aiming moves the camera to the other shoulder (and back).
 - Faster knife: knife attacks are 1.5x faster (adjustable).
 - Walk and run with the inventory open: the left stick moves you (L3 runs), the d-pad moves the
   inventory cursor.
@@ -39,8 +39,8 @@ What the mod does
   all player weapons (plus an extra one for the knife) instead of the game's floating difficulty
   scaling. Damage you take is unchanged.
 - Optional balance and look settings: rate of fire of all guns (FireRate), walking and running speed
-  (MoveWalkSpeed, MoveRunSpeed), no yellow colour filter (NoColorFilter=1).
-- Optional free camera during melee attacks (MeleeCamera=1), and a separate "melee camera only"
+  (MoveWalkSpeed, MoveRunSpeed), no yellow colour filter (NoColorFilter, on by default).
+- Free camera during melee attacks (MeleeCamera, on by default), and a separate "melee camera only"
   mode that leaves the rest of the game original (see below).
 - The original game's own moves still work on the new layout: Wesker's dash in The Mercenaries,
   the taunt, the knife straight from the gun aim, the reload with LT + A, night vision in the
@@ -55,17 +55,17 @@ What the mod does
     B ............. partner command; B with the stick toward the camera = 180 turn (the camera
                     swings round behind you)
     Y ............. inventory (the left stick keeps walking while it is open)
-    L3 click ...... run (toggle: click to run, let go of the stick to stop);
+    RB ............ run (toggle: press to run, let go of the stick to stop);
                     while aiming: fast / normal pace
     R3 click ...... camera behind you (for Wesker in The Mercenaries also his dash)
     R3 + L3 ....... taunt (hold R3, click L3)
-    RB ............ locate partner; while aiming: swap shoulder
+    L3 click ...... locate partner; while aiming: swap shoulder
     Back (View) ... map
     D-pad ......... quick weapon select (as in the original)
     Start ......... pause
 
-  RunButton=RB swaps L3 and RB: RB runs (and switches the pace while aiming), L3 locates the
-  partner (and swaps the shoulder while aiming). One press never does both.
+  RB runs (and switches the pace while aiming), L3 locates the partner (and swaps the shoulder
+  while aiming). RunButton=L3 swaps them: L3 runs, RB locates the partner. One press never does both.
   In the inventory the left stick walks (L3 runs) and the d-pad moves the cursor; A opens the item
   menu and RB shows your partner's items. InventoryMove=0 gives the original inventory (you stand
   still, the stick moves the cursor). Menus and QTEs work as in the original: in QTEs press what is
@@ -96,8 +96,9 @@ The RE3 layout keeps the original game's own moves where they have a meaning:
 - LB pressed while aiming readies the knife straight from the gun aim; let go of LB to go back to the
   gun.
 - LT + A reloads while aiming, as in the original (X still reloads anywhere).
-- Crouched behind low cover the right stick also turns the character, as in the original.
-Each of these has a setting (WeskerDash, StickClicks, KnifeFromAim, CoverTurn); 0 gives the v1.8
+- In cover (low or wall) the game's own camera and sticks are used, so the right stick also turns the
+  character, as in the original.
+Each of these has a setting (WeskerDash, StickClicks, KnifeFromAim); 0 gives the v1.8
 behaviour.
 
 Melee camera only (separate mode)
@@ -163,8 +164,8 @@ Online co-op
 Settings (RE3Controls.ini, applied while the game is running)
 -------------------------------------------------------------
     Mode=MeleeCamera          only the melee camera, everything else original (see above)
-    Run=Toggle|Hold|Stock     run: toggle with L3 / hold L3 / original (hold A)
-    RunButton=RB              run with RB instead of L3 (L3 then locates the partner / swaps shoulder)
+    Run=Toggle|Hold|Stock     run: toggle with RB / hold RB (L3 with RunButton=L3) / original (hold A)
+    RunButton=L3              run with L3 instead of RB (RB then locates the partner / swaps shoulder)
     InteractButton=X          the prompts (open, pick up, finishers) stay on X as in the original game;
                               X reloads when no prompt is on screen (default A, as in RE3)
     InventoryMove=0           the original inventory: you stand still and the stick moves the cursor
@@ -176,9 +177,10 @@ Settings (RE3Controls.ini, applied while the game is running)
     InvertY=1                 invert the camera vertically
     Distance=230              camera distance behind the shoulder (cm)
     Height=150                height of the point the camera orbits around
-    Shoulder=45               how far the camera is shifted toward the shoulder
+    Shoulder=60               how far the camera is shifted toward the shoulder
     Tilt=8                    default camera tilt (degrees, + = looking down); R3 returns to it
-    AimDistance=0             aiming: the camera this many cm farther back (0-200), e.g. 60 for a roomier
+    AimDistance=100           aiming: the camera this many cm farther back (0-200; 0 = the game's own aim
+                              camera), e.g. 60 for a roomier
                               view; the crosshair and where shots land stay the same (not in the sniper or
                               rocket launcher scope, on gun emplacements or vehicle guns)
     FieldOfView=0             field of view, degrees added to the game's 45 (-15 to 40), e.g. 15 = 60
@@ -189,17 +191,17 @@ Settings (RE3Controls.ini, applied while the game is running)
                               camera, as in the original game, instead of turning round (RE3 Remake);
                               also while reloading or switching on the move and in the inventory
     FollowPlatform=0          on a turning boat the camera keeps its world direction instead
-    MeleeCamera=1             no attack cinematics: the camera stays free during melee attacks
-    GrabCamera=1              no grab cinematics: the camera stays free while an enemy holds you
-                              (also with Mode=MeleeCamera); deadly grabs (chainsaw, Executioner),
-                              bosses and giants keep the game's camera
-    CoverTurn=0               behind low cover the right stick only turns the camera (not the character)
+    MeleeCamera=0             the game's attack cinematics during melee attacks (default 1: no
+                              cinematics, the camera stays free)
+    GrabCamera=0              the game's grab cinematics (default 1: no cinematics, the camera stays
+                              free while an enemy holds you; also with Mode=MeleeCamera); deadly grabs
+                              (chainsaw, Executioner), bosses and giants keep the game's camera
     GunWalk=0                 shoot standing: no walking while aiming a gun (as in the original)
     KnifeWalk=0               no walking with the knife
     ReloadWalk=0              reload standing when you press X without aiming (the camera still stays
                               normal, no zoom); a reload while holding LT follows GunWalk
     WalkSpeed=1.125           walking pace while aiming or holding the knife (1.0 = normal walk)
-    FastWalkSpeed=1.875       fast pace while aiming or holding the knife (L3)
+    FastWalkSpeed=1.875       fast pace while aiming or holding the knife (RB)
     SwitchWalk=0              stand still while drawing or switching a weapon (as in the original)
     ScopeWalk=1               walk in the scope of sniper rifles and rocket launchers too; zoom with RB
                               held + the left stick (the legs stop meanwhile); keyboard: the mouse wheel.
@@ -211,7 +213,8 @@ Settings (RE3Controls.ini, applied while the game is running)
                               1.0 = the original (about 0.14 s behind), 0 = not at all
     KnifeSpeed=1.5            knife attack speed (1.0 = original)
     Crosshair=0               back to the laser sight (also turns off DirectHorizontal)
-    CrosshairSize=1.0         crosshair size: 0.5 = half, 2.0 = twice as big (0.25-4); the opening on a
+    CrosshairSize=1.0         crosshair size (default 0.5): 1.0 = the game's own, 2.0 = twice as big
+                              (0.25-4); the opening on a
                               shot grows and shrinks with it
     DirectHorizontal=0        back to the original horizontal arm-only aim zone (the view does not turn)
     CrosshairKick=1.0         how far the crosshair opens on a shot (2.0 = twice, 0 = not at all, also not
@@ -230,11 +233,11 @@ Settings (RE3Controls.ini, applied while the game is running)
                               co-op the host's value (both players need v1.8 or newer)
     MoveWalkSpeed=1.0         walking speed outside the aim (0.5-2; 1.0 = original)
     MoveRunSpeed=1.0          running speed (0.5-2)
-    NoColorFilter=1           remove the yellow colour tint of the levels (the game's own Special
-                              Settings filters still work)
+    NoColorFilter=0           keep the yellow colour tint of the levels (default 1: removed; the game's own
+                              Special Settings filters still work)
     HookDelayMs=3000          extra wait before the mod changes the game at start (see below)
     KeyboardMouse=0           keyboard/mouse: the game's own controls instead of the mod's
-    Run=Toggle                keyboard: press the run key once instead of holding it (in [Keyboard])
+    Run=Hold                  keyboard: hold the run key (default Toggle: press once; in [Keyboard])
     MouseSensitivity=1.0      mouse speed for the camera and the aim, on top of the game's own option
                               (default 0.75; higher = faster)
     MouseVertical=1.0         vertical mouse speed relative to horizontal
@@ -277,7 +280,7 @@ re5dx9.exe, reads RE3Controls.ini and writes RE3Controls.log in the game folder.
 connections of its own (co-op data goes through the game's own Steam networking) and touches no other
 program. Since v1.6 the release DLL carries version information (Properties -> Details) and contains
 no developer tools.
-SHA-256 of the v1.9 xinput1_3.dll: @SHA256@
+SHA-256 of the v1.9.4 xinput1_3.dll: @SHA256@
 If you get a warning, please report the exact text, the program that showed it, the detection name
 and the SHA-256 of your file (PowerShell: Get-FileHash "<game folder>\xinput1_3.dll").
 
